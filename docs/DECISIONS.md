@@ -128,3 +128,50 @@ templates, both exercise histories; fixtures kept local, never committed):
 (Pull Up's template id was absent from templates page 1, so it groups under
 "other" per the documented design; its history weights are null so it has no
 1RM.)
+
+## FIX 4 (Sep 30, 2026): Number action fails on empty text (null weight_kg)
+
+Daniel's device run failed with "Number failed because shortcuts couldn't
+convert from Text to Number." Root cause: bodyweight history entries (his
+Pull Up) have `weight_kg: null` -> the template coerced to `""` and called
+`number("")` unconditionally for every qualifying history entry. Shortcuts'
+Number action FAILS on empty text instead of returning 0.
+
+Fix in `shortcut/hevy-stats.cherri`: `@wNum`/`@rNum` now default to 0 and
+`number()` is only called when the text is explicitly non-empty (`!= @empty`).
+Null weight/reps then falls through the existing `> 0` / `>= 1` guards and
+the entry is skipped — correct, since a null weight can't produce a 1RM.
+
+Test hardening (same session, at Daniel's suggestion):
+- `test/native-sim.js`: `toNumber` is now device-faithful — it THROWS on
+  empty/non-numeric input like the real Number action, so any unguarded call
+  fails loudly in tests instead of silently returning 0. Added regression
+  test "edge: null weight_kg (bodyweight) never reaches number()" with null
+  weight AND null reps entries. Negative control confirmed: with the old
+  unguarded sim, this test fails with the exact device error.
+- His real API responses are now saved as mocked regression data in
+  `local-fixtures/` (routines, templates, both histories) with
+  `test/real-fixtures-check.js` feeding them through the same pipeline and
+  asserting the known-good result. local-fixtures/ is NEVER pushed to the
+  public repo (personal workout data); old code run against it throws the
+  exact device error, new code passes.
+
+## Signing flow (corrected Sep 30, 2026)
+
+- `python3 build/build.py` compiles with `cherri --skip-sign`, then
+  post-processes the plist (sets `WFWorkflowHasShortcutInputVariables` and
+  `WFWorkflowName`). Output: `dist/HevyStats.shortcut` (unsigned, for
+  inspection).
+- Signing: `cherri shortcut/hevy-stats.cherri --hubsign
+  --output=dist/HevyStats_signed.shortcut` compiles the source and signs via
+  RoutineHub's HubSign (`https://hubsign.routinehub.services/sign`), producing
+  an AEA1 container. cherri does NOT accept a pre-built `.shortcut` file for
+  signing — only `.cherri` source. (`npx cherri` does not exist; the binary is
+  at `~/.local/bin/cherri`.)
+- `#define name Hevy Stats` at the top of the source sets the output
+  filename; the plist `WFWorkflowName` is only set by build.py's
+  post-processing (unsigned artifact). The signed artifact's display name
+  therefore comes from cherri's default.
+- HubSign can be flaky: on Sep 30, 2026 ~19:25 EDT it began timing out on
+  POST /sign (host up, 404 on root; signing worker hanging). Retry loop
+  approach works; do not mistake the Go panic for a source error.
