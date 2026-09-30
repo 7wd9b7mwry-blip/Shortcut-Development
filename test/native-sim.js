@@ -1,128 +1,115 @@
-// Native-simulation test for shortcut/hevy-stats.cherri.
+// Node simulation of shortcut/hevy-stats.cherri (native actions, no JS).
 //
-// The shortcut cannot run on this machine, so this file re-implements the
-// Cherri template's logic step-for-step in plain JS and runs it against the
-// API fixtures. Anything the template computes (control flow, string
-// building, JSON escaping, Epley math, rounding) is validated here; the
-// Cherri COMPILATION itself is validated separately by inspecting the
-// compiled plist (action sequence, conditionals, terminal output).
+// Faithful mirror of the Cherri control flow: numeric errFlag (0/1),
+// explicit == "" / != "" emptiness checks (bare truthiness checks are NOT
+// used in the shortcut — device testing Sep 30, 2026 showed they
+// misbehave at runtime), comma-padded `contains` for set types, text
+// round-trip for setValue numbers, and hand-built JSON with escaping.
 //
-// Mirroring notes (Shortcuts semantics):
-//  - "{@d['k']}" interpolation of null/missing -> "".
-//  - number("") -> NaN here; every numeric comparison with it is false,
-//    which matches the shortcut excluding the set.
-//  - `if @okTypes contains ",{t},"` -> okTypes.includes("," + t + ",").
-//  - round(x, "Tenths") -> Math.round(x*10)/10.
+// Run: node test/native-sim.js
+"use strict";
 
 var fs = require("fs");
 var path = require("path");
+var assert = require("assert");
 
-var failures = 0;
-
-function fixture(name) {
-  return fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8");
+var FIX = path.join(__dirname, "fixtures");
+function load(name) {
+  return JSON.parse(fs.readFileSync(path.join(FIX, name), "utf8"));
 }
 
-function check(name, actual, expected) {
-  var a = JSON.stringify(actual);
-  var e = JSON.stringify(expected);
-  if (a === e) {
-    console.log("ok   " + name);
-  } else {
-    failures++;
-    console.log("FAIL " + name);
-    console.log("  expected: " + e);
-    console.log("  actual:   " + a);
-  }
+// Shortcuts semantics: number("  ") -> 0? Here we mirror the template's
+// usage: number() is only called on values already known non-empty.
+function toNumber(txt) {
+  var t = String(txt == null ? "" : txt).trim();
+  if (t === "") return 0;
+  var n = Number(t);
+  return isNaN(n) ? 0 : n;
 }
-
-// Shortcuts text interpolation: null/undefined -> "", else String(v).
 function txt(v) {
-  return v === null || v === undefined ? "" : String(v);
+  return v == null ? "" : String(v);
 }
-
-// Shortcuts Number action on text.
-function toNumber(s) {
-  if (s === null || s === undefined || String(s).trim() === "") return NaN;
-  var n = Number(s);
-  return isNaN(n) ? NaN : n;
-}
-
-function jsonEscape(s) {
-  return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+function esc(s) {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 var OK_TYPES = ",normal,failure,dropset,";
 
-// Simulates the template. historyByTid maps template id -> history JSON text.
-// Returns { finalJson } on success or { errJson } on error, mirroring the
-// shortcut's terminal branch.
-function runShortcut(apiKey, routinesJson, templatesJson, historyByTid) {
-  var errMsg = "", errDetail = "", errStage = "";
+// Mirrors the Cherri template exactly: errFlag numeric, explicit "" checks.
+function runNative(apiKey, api) {
+  var errFlag = 0;
+  var errMsg = "";
+  var errDetail = "";
+  var errStage = "";
 
-  function fail(stage, msg, detail) {
-    if (!errMsg) { errStage = stage; errMsg = msg; errDetail = detail; }
+  if (apiKey === "") {
+    errFlag = 1;
+    errStage = "read-input";
+    errMsg = "Missing API key";
+    errDetail = "Shortcut Input was empty. Pass your Hevy API key as the shortcut input.";
   }
 
-  if (!apiKey) {
-    fail("read-input", "Missing API key",
-      "Shortcut Input was empty. Pass your Hevy API key as the shortcut input.");
-  }
-
-  var routinesDict = null, templatesDict = null;
-  var routineName = "", routine = null, templates = [];
-  if (!errMsg) {
-    if (!routinesJson) {
-      fail("fetch-routines", "Routines request returned no data",
-        "GET /v1/routines came back empty. Check your network connection.");
+  var routinesJson = "";
+  if (errFlag === 0) {
+    routinesJson = api.routines; // raw text from downloadURL
+    if (routinesJson === "") {
+      errFlag = 1;
+      errStage = "fetch-routines";
+      errMsg = "Routines request returned no data";
+      errDetail = "GET /v1/routines came back empty. Check your network connection.";
     }
   }
-  if (!errMsg) {
-    try { routinesDict = JSON.parse(routinesJson); }
-    catch (e) { routinesDict = null; }
-    if (!routinesDict || typeof routinesDict !== "object" || Array.isArray(routinesDict)) {
-      fail("parse-routines", "Routines response is not valid JSON",
-        "The /v1/routines response could not be parsed as JSON.");
-    }
-  }
-  if (!errMsg) {
-    var routinesList = (routinesDict && routinesDict.routines) || [];
+
+  var routinesList = [];
+  var routineName = "";
+  var routine = null;
+  if (errFlag === 0) {
+    var routinesDict = JSON.parse(routinesJson); // getDictionary
+    routinesList = routinesDict["routines"] || [];
     if (!Array.isArray(routinesList)) routinesList = [];
     if (routinesList.length === 0) {
-      fail("parse-routines", "No routines found",
-        "The /v1/routines response contained zero routines. Check that the API key is correct and Hevy Pro is active.");
-    } else {
-      routine = routinesList[0];
-      routineName = txt(routine.title);
-      if (!routineName) {
-        fail("parse-routines", "First routine has no title",
-          "The most recently updated routine has no usable 'title'.");
-      }
+      errFlag = 1;
+      errStage = "parse-routines";
+      errMsg = "No usable routines in response";
+      errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active.";
     }
   }
-  if (!errMsg) {
-    if (!templatesJson) {
-      fail("fetch-templates", "Exercise templates request returned no data",
-        "GET /v1/exercise_templates came back empty. Check your network connection.");
-    }
-  }
-  if (!errMsg) {
-    try { templatesDict = JSON.parse(templatesJson); }
-    catch (e) { templatesDict = null; }
-    if (!templatesDict || typeof templatesDict !== "object" || Array.isArray(templatesDict)) {
-      fail("parse-templates", "Templates response is not valid JSON",
-        "The /v1/exercise_templates response could not be parsed as JSON.");
-    } else {
-      templates = templatesDict.exercise_templates || [];
-      if (!Array.isArray(templates)) templates = [];
+  if (errFlag === 0) {
+    routine = routinesList[0]; // getFirstItem
+    routineName = txt(routine["title"]);
+    if (routineName === "") {
+      errFlag = 1;
+      errStage = "parse-routines";
+      errMsg = "First routine has no title";
+      errDetail = "The most recently updated routine has no usable 'title'.";
     }
   }
 
-  var resultJson = "";
-  if (!errMsg) {
-    var exercises = (routine && routine.exercises) || [];
+  var templatesJson = "";
+  if (errFlag === 0) {
+    templatesJson = api.templates;
+    if (templatesJson === "") {
+      errFlag = 1;
+      errStage = "fetch-templates";
+      errMsg = "Exercise templates request returned no data";
+      errDetail = "GET /v1/exercise_templates came back empty. Check your network connection.";
+    }
+  }
+  var templates = [];
+  if (errFlag === 0) {
+    var templatesDict = JSON.parse(templatesJson);
+    templates = templatesDict["exercise_templates"] || [];
+    if (!Array.isArray(templates)) templates = [];
+    // tolerated when missing/empty -> "other"
+  }
+
+  var wsDict = {};
+  var muscleOrder = [];
+  var rmJsonParts = [];
+  if (errFlag === 0) {
+    var exercises = routine["exercises"] || [];
     if (!Array.isArray(exercises)) exercises = [];
-    var wsDict = {}, muscleOrder = [], seenTids = "|", rmEntries = [];
+    var seenTids = "|";
 
     exercises.forEach(function (ex) {
       var tid = txt(ex.exercise_template_id);
@@ -131,7 +118,7 @@ function runShortcut(apiKey, routinesJson, templatesJson, historyByTid) {
       templates.forEach(function (t) {
         if (txt(t.id) === tid) {
           var pmg = txt(t.primary_muscle_group);
-          if (pmg) muscle = pmg;
+          if (pmg !== "") muscle = pmg;
         }
       });
 
@@ -142,132 +129,225 @@ function runShortcut(apiKey, routinesJson, templatesJson, historyByTid) {
       sets.forEach(function (s) {
         if (OK_TYPES.indexOf("," + txt(s.type) + ",") >= 0) wsCount++;
       });
-      if (!(muscle in wsDict)) { wsDict[muscle] = 0; muscleOrder.push(muscle); }
-      wsDict[muscle] += wsCount;
+      var curVal = wsDict[muscle]; // getValue -> undefined when missing
+      var curNum;
+      if (curVal === undefined || curVal === "") {
+        curNum = 0;
+        muscleOrder.push(muscle);
+      } else {
+        curNum = toNumber(String(curVal)); // text round-trip
+      }
+      wsDict[muscle] = curNum + wsCount; // setValue stores text
 
       // History: fetched once per template id (deduplicated).
       var dup = false;
-      if (tid) {
+      if (tid !== "") {
         if (seenTids.indexOf("|" + tid + "|") >= 0) dup = true;
         else seenTids += tid + "|";
       }
       if (dup) return;
+      if (tid === "") return;
 
-      if (tid) {
-        var best = 0;
-        var hJson = historyByTid[tid];
-        if (hJson) {
-          var hDict = null;
-          try { hDict = JSON.parse(hJson); } catch (e) { hDict = null; }
-          if (hDict && typeof hDict === "object") {
-            var entries = hDict.exercise_history || [];
-            if (!Array.isArray(entries)) entries = [];
-            entries.forEach(function (e) {
-              var hType = txt(e.set_type);
-              if (OK_TYPES.indexOf("," + hType + ",") < 0) return;
-              var wNum = toNumber(txt(e.weight_kg));
-              var rNum = toNumber(txt(e.reps));
-              if (!(wNum > 0)) return;
-              if (!(rNum >= 1)) return;
-              if (!(rNum <= 30)) return;
-              var est = (rNum === 1) ? wNum * 1 : wNum * (1 + rNum / 30);
-              if (est > best) best = est;
-            });
-          }
-        }
-        if (best > 0) {
-          var bestR = Math.round(best * 10) / 10;
-          var title = txt(ex.title) || tid;
-          rmEntries.push('"' + jsonEscape(title) + '": ' + bestR);
-        }
+      var best = 0;
+      var historyJson = api.history[tid] || "";
+      if (historyJson !== "") {
+        var historyDict = JSON.parse(historyJson);
+        var entries = historyDict["exercise_history"] || [];
+        if (!Array.isArray(entries)) entries = [];
+        entries.forEach(function (e) {
+          var hType = txt(e.set_type);
+          if (OK_TYPES.indexOf("," + hType + ",") < 0) return;
+          var wNum = toNumber(txt(e.weight_kg));
+          var rNum = toNumber(txt(e.reps));
+          if (!(wNum > 0)) return;
+          if (!(rNum >= 1)) return;
+          if (!(rNum <= 30)) return;
+          var est = rNum === 1 ? wNum * 1 : wNum * (1 + rNum / 30);
+          if (est > best) best = est;
+        });
+      }
+      if (best > 0) {
+        var bestR = Math.round(best * 10) / 10;
+        var title = txt(ex.title);
+        if (title === "") title = tid;
+        rmJsonParts.push('"' + esc(title) + '": ' + bestR);
       }
     });
-
-    var wsEntries = muscleOrder.map(function (m) {
-      return '"' + jsonEscape(m) + '": ' + wsDict[m];
-    });
-    resultJson = '{"routineName": "' + jsonEscape(routineName) +
-      '", "workingSetsPerMuscleGroup": {' + wsEntries.join(", ") +
-      '}, "oneRepMaxKgPerExercise": {' + rmEntries.join(", ") + '}}';
   }
 
-  if (errMsg) {
-    var errJson = '{"_error": "' + jsonEscape(errMsg) + '", "_context": ' +
-      '{"stage": "' + jsonEscape(errStage) + '", "detail": "' + jsonEscape(errDetail) + '"}}';
-    return { errJson: errJson };
+  var wsEntries = muscleOrder
+    .map(function (m) {
+      return '"' + esc(m) + '": ' + wsDict[m];
+    })
+    .join(", ");
+
+  var resultJson =
+    '{"routineName": "' + esc(routineName) + '", "workingSetsPerMuscleGroup": {' +
+    wsEntries + '}, "oneRepMaxKgPerExercise": {' + rmJsonParts.join(", ") + "}}";
+
+  var errJson =
+    '{"_error": "' + esc(errMsg) + '", "_context": {"stage": "' + errStage +
+    '", "detail": "' + esc(errDetail) + '" }}';
+
+  // Terminal: two separate explicit checks, exactly one runs.
+  var notifications = [];
+  var finalJson;
+  if (errFlag === 1) {
+    notifications.push("Hevy Stats error: " + errMsg + " (" + errDetail + ")");
+    finalJson = errJson;
   }
-  return { finalJson: resultJson };
+  if (errFlag === 0) {
+    finalJson = resultJson;
+  }
+  var finalResult = JSON.parse(finalJson); // getDictionary
+  if (finalJson === "") {
+    notifications.push("Hevy Stats: internal error, empty result (this should never happen).");
+  }
+  return { result: finalResult, notifications: notifications, errFlag: errFlag };
 }
 
-// --- Happy path against fixtures ---
-var histories = {
-  "tpl-bench": fixture("api-history-bench.json"),
-  "tpl-ohp": fixture("api-history-ohp.json"),
-  "tpl-tri": fixture("api-history-tri.json"),
-  "tpl-missing": fixture("api-history-missing.json")
+// ---------- fixtures ----------
+function happyApi() {
+  return {
+    routines: JSON.stringify(load("api-routines.json")),
+    templates: JSON.stringify(load("api-templates.json")),
+    history: {
+      "tpl-bench": JSON.stringify(load("api-history-bench.json")),
+      "tpl-ohp": JSON.stringify(load("api-history-ohp.json")),
+      "tpl-tri": JSON.stringify(load("api-history-tri.json")),
+      "tpl-missing": JSON.stringify(load("api-history-missing.json")),
+    },
+  };
+}
+
+var EXPECTED = {
+  routineName: "Push Day",
+  workingSetsPerMuscleGroup: { chest: 5, shoulders: 3, triceps: 2, other: 2 },
+  oneRepMaxKgPerExercise: {
+    "Bench Press (Barbell)": 116.7,
+    "Overhead Press (Dumbbell)": 51,
+    "Triceps Pushdown (Cable)": 42,
+    "Mystery Machine": 93.3,
+  },
 };
-var r = runShortcut("KEY", fixture("api-routines.json"), fixture("api-templates.json"), histories);
-check("happy path: no error", !!r.finalJson, true);
-var parsed = JSON.parse(r.finalJson); // must be valid JSON
-check("happy path: routineName", parsed.routineName, "Push Day");
-check("happy path: workingSetsPerMuscleGroup", parsed.workingSetsPerMuscleGroup, {
-  chest: 5, shoulders: 3, triceps: 2, other: 2
-});
-check("happy path: oneRepMaxKgPerExercise", parsed.oneRepMaxKgPerExercise, {
-  "Bench Press (Barbell)": 116.7,
-  "Overhead Press (Dumbbell)": 51,
-  "Triceps Pushdown (Cable)": 42,
-  "Mystery Machine": 93.3
-});
 
-// --- Duplicate template id is fetched once, counted per occurrence ---
-check("happy path: chest working sets include dup exercise", parsed.workingSetsPerMuscleGroup.chest, 5);
-check("happy path: one 1RM entry for dup template", Object.keys(parsed.oneRepMaxKgPerExercise).length, 4);
-
-// --- Error paths produce structured error JSON ---
-function errCase(name, args, expStage, expMsgPart) {
-  var out = runShortcut.apply(null, args);
-  if (!out.errJson) { failures++; console.log("FAIL " + name + " (expected error, got success)"); return; }
-  var p = JSON.parse(out.errJson); // must be valid JSON
-  var okMsg = p._error.indexOf(expMsgPart) >= 0;
-  var okStage = p._context && p._context.stage === expStage;
-  if (okMsg && okStage) console.log("ok   " + name);
-  else {
+var failures = 0;
+function check(name, fn) {
+  try {
+    fn();
+    console.log("ok  ", name);
+  } catch (e) {
     failures++;
-    console.log("FAIL " + name + " -> " + JSON.stringify(p));
+    console.log("FAIL", name);
+    console.log("  " + String(e.message).split("\n").join("\n  "));
   }
 }
-var R = fixture("api-routines.json"), T = fixture("api-templates.json");
-errCase("error: missing api key", ["", R, T, histories], "read-input", "Missing API key");
-errCase("error: empty routines payload", ["K", "", T, histories], "fetch-routines", "no data");
-errCase("error: routines not JSON", ["K", "not json", T, histories], "parse-routines", "not valid JSON");
-errCase("error: zero routines", ["K", '{"routines":[]}', T, histories], "parse-routines", "No routines found");
-errCase("error: templates not JSON", ["K", R, "nope", histories], "parse-templates", "not valid JSON");
 
-// --- Edge: titles/muscles needing JSON escaping ---
-var evilRoutines = JSON.stringify({ routines: [{ title: 'Weird "Day" \\', exercises: [
-  { exercise_template_id: "t1", title: 'Lift "Heavy" \\', sets: [{ type: "normal" }] }
-]}]});
-var evilTemplates = JSON.stringify({ exercise_templates: [{ id: "t1", primary_muscle_group: 'che"st' }] });
-var evilHist = { t1: JSON.stringify({ exercise_history: [{ weight_kg: 100, reps: 5, set_type: "normal" }] }) };
-var er = runShortcut("K", evilRoutines, evilTemplates, evilHist);
-var ep = JSON.parse(er.finalJson); // must parse
-check("escape: routineName round-trips", ep.routineName, 'Weird "Day" \\');
-check("escape: muscle key round-trips", ep.workingSetsPerMuscleGroup, { 'che"st': 1 });
-check("escape: title key round-trips", ep.oneRepMaxKgPerExercise, { 'Lift "Heavy" \\': 116.7 });
-
-// --- Edge: empty templates -> "other"; missing history -> omitted ---
-var r2 = runShortcut("K", R, '{"exercise_templates":[]}', {});
-var p2 = JSON.parse(r2.finalJson);
-check("edge: empty templates groups under other", p2.workingSetsPerMuscleGroup, { other: 12 });
-check("edge: no history -> no 1RMs", p2.oneRepMaxKgPerExercise, {});
-
-// --- Edge: no exercises at all ---
-var r3 = runShortcut("K", '{"routines":[{"title":"Rest","exercises":[]}]}', T, {});
-var p3 = JSON.parse(r3.finalJson);
-check("edge: empty exercises", p3, {
-  routineName: "Rest", workingSetsPerMuscleGroup: {}, oneRepMaxKgPerExercise: {}
+// ---------- tests ----------
+check("happy path: no error", function () {
+  var r = runNative("KEY", happyApi());
+  assert.strictEqual(r.errFlag, 0);
+  assert.deepStrictEqual(r.notifications, []);
+});
+check("happy path: routineName", function () {
+  assert.strictEqual(runNative("KEY", happyApi()).result.routineName, EXPECTED.routineName);
+});
+check("happy path: workingSetsPerMuscleGroup", function () {
+  assert.deepStrictEqual(
+    runNative("KEY", happyApi()).result.workingSetsPerMuscleGroup,
+    EXPECTED.workingSetsPerMuscleGroup
+  );
+});
+check("happy path: oneRepMaxKgPerExercise", function () {
+  assert.deepStrictEqual(
+    runNative("KEY", happyApi()).result.oneRepMaxKgPerExercise,
+    EXPECTED.oneRepMaxKgPerExercise
+  );
+});
+check("happy path: chest working sets include dup exercise", function () {
+  // tpl-bench appears twice (4 + 1 working sets) -> chest == 5
+  assert.strictEqual(runNative("KEY", happyApi()).result.workingSetsPerMuscleGroup.chest, 5);
+});
+check("happy path: one 1RM entry for dup template", function () {
+  var rms = runNative("KEY", happyApi()).result.oneRepMaxKgPerExercise;
+  assert.strictEqual(Object.keys(rms).filter(function (k) { return k.indexOf("Bench") >= 0; }).length, 1);
+});
+check("error: missing api key -> notification + error dict", function () {
+  var r = runNative("", happyApi());
+  assert.strictEqual(r.errFlag, 1);
+  assert.strictEqual(r.notifications.length, 1);
+  assert.ok(r.notifications[0].indexOf("Missing API key") >= 0);
+  assert.strictEqual(r.result._error, "Missing API key");
+  assert.strictEqual(r.result._context.stage, "read-input");
+});
+check("error: empty routines payload", function () {
+  var api = happyApi(); api.routines = "";
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result._error, "Routines request returned no data");
+  assert.strictEqual(r.result._context.stage, "fetch-routines");
+  assert.ok(r.notifications[0].indexOf("Routines request returned no data") >= 0);
+});
+check("error: routines not JSON -> throws (system-level, like halt)", function () {
+  var api = happyApi(); api.routines = "<html>nope</html>";
+  assert.throws(function () { runNative("KEY", api); }, SyntaxError);
+});
+check("error: zero routines", function () {
+  var api = happyApi(); api.routines = JSON.stringify({ routines: [] });
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result._error, "No usable routines in response");
+});
+check("error: templates not JSON -> throws (system-level, like halt)", function () {
+  var api = happyApi(); api.templates = "garbage{";
+  assert.throws(function () { runNative("KEY", api); }, SyntaxError);
+});
+check("escape: routineName round-trips", function () {
+  var api = happyApi();
+  var rej = load("api-routines.json");
+  rej.routines[0].title = 'Leg "Day" \\ Hard';
+  api.routines = JSON.stringify(rej);
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result.routineName, 'Leg "Day" \\ Hard');
+});
+check("escape: muscle key round-trips", function () {
+  var api = happyApi();
+  var tej = load("api-templates.json");
+  tej.exercise_templates[0].primary_muscle_group = 'we"ird\\m';
+  api.templates = JSON.stringify(tej);
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result.workingSetsPerMuscleGroup['we"ird\\m'], 5);
+});
+check("escape: title key round-trips", function () {
+  var api = happyApi();
+  var rej = load("api-routines.json");
+  rej.routines[0].exercises[0].title = 'Be"nch\\Press';
+  api.routines = JSON.stringify(rej);
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise['Be"nch\\Press'], 116.7);
+});
+check("edge: empty templates groups under other", function () {
+  var api = happyApi(); api.templates = JSON.stringify({ exercise_templates: [] });
+  var r = runNative("KEY", api);
+  assert.deepStrictEqual(r.result.workingSetsPerMuscleGroup, { other: 12 });
+});
+check("edge: no history -> no 1RMs", function () {
+  var api = happyApi(); api.history = {};
+  var r = runNative("KEY", api);
+  assert.deepStrictEqual(r.result.oneRepMaxKgPerExercise, {});
+  assert.strictEqual(r.result.workingSetsPerMuscleGroup.chest, 5);
+});
+check("edge: empty exercises", function () {
+  var api = happyApi();
+  var rej = load("api-routines.json");
+  rej.routines[0].exercises = [];
+  api.routines = JSON.stringify(rej);
+  var r = runNative("KEY", api);
+  assert.deepStrictEqual(r.result.workingSetsPerMuscleGroup, {});
+  assert.deepStrictEqual(r.result.oneRepMaxKgPerExercise, {});
 });
 
-if (failures > 0) { console.log("\n" + failures + " FAILURE(S)"); process.exit(1); }
-console.log("\nAll native-sim tests passed.");
+if (failures > 0) {
+  console.log("\n" + failures + " FAILURE(S)");
+  process.exit(1);
+} else {
+  console.log("\nAll native-sim tests passed.");
+}
