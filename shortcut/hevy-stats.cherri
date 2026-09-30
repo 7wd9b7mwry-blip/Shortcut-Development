@@ -1,0 +1,253 @@
+// Hevy Stats — native Shortcuts actions (no JavaScript, no HTML).
+//
+// Input:  Hevy API key passed as Shortcut Input (never prompted).
+// Output: ALWAYS a dictionary — either the stats result:
+//           {"routineName": ..., "workingSetsPerMuscleGroup": {...},
+//            "oneRepMaxKgPerExercise": {...}}
+//         or a detailed error:
+//           {"_error": ..., "_context": {"stage": ..., "detail": ...}}
+// Error branches also show a notification with the specific message and
+// relevant state. There are no silent failures.
+//
+// Stats mirror src/hevy-stats.js (kept as the tested spec):
+//   - working sets: routine sets whose type is normal/failure/dropset
+//     (warmup excluded), grouped by the exercise's primary muscle group
+//     ("other" when the template lookup misses).
+//   - 1RM: best Epley estimate (weight*(1+reps/30), true singles use the
+//     weight itself) over history sets with weight > 0 and 1 <= reps <= 30,
+//     rounded to 0.1 kg. Exercises without a qualifying set are omitted.
+//   - the first routine returned by the API is treated as most recently
+//     updated.
+//
+// NOTE: Get Contents of URL halts the shortcut with a system error on HTTP
+// or network failures (e.g. a wrong API key -> 401); Shortcuts offers no
+// try/catch for that. Everything else is handled below.
+
+#include 'actions/web'
+#include 'actions/text'
+#include 'actions/math'
+#define name HevyStats
+
+@apiKey = "{ShortcutInput}"
+@errMsg = ""
+@errDetail = ""
+@errStage = ""
+// Literal braces for hand-built JSON (single-quoted = raw, no interpolation).
+@ob = '{'
+@cb = '}'
+// Working-set types, comma-padded so `contains` matches whole types only.
+@okTypes = ",normal,failure,dropset,"
+
+if !@apiKey {
+    @errStage = "read-input"
+    @errMsg = "Missing API key"
+    @errDetail = "Shortcut Input was empty. Pass your Hevy API key as the shortcut input."
+}
+
+// --- Fetch routines ---
+if !@errMsg {
+    @routinesJson = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{@apiKey}"})
+    if !@routinesJson {
+        @errStage = "fetch-routines"
+        @errMsg = "Routines request returned no data"
+        @errDetail = "GET /v1/routines came back empty. Check your network connection."
+    }
+}
+
+// --- Parse routines ---
+if !@errMsg {
+    @routinesDict = getDictionary(@routinesJson)
+    if !@routinesDict {
+        @errStage = "parse-routines"
+        @errMsg = "Routines response is not valid JSON"
+        @errDetail = "The /v1/routines response could not be parsed as JSON."
+    }
+}
+if !@errMsg {
+    @routinesList = @routinesDict['routines']
+    @nRoutines = count(@routinesList)
+    if @nRoutines == 0 {
+        @errStage = "parse-routines"
+        @errMsg = "No routines found"
+        @errDetail = "The /v1/routines response contained zero routines. Check that the API key is correct and Hevy Pro is active."
+    }
+}
+if !@errMsg {
+    @routine = getFirstItem(@routinesList)
+    @routineName = "{@routine['title']}"
+    if !@routineName {
+        @errStage = "parse-routines"
+        @errMsg = "First routine has no title"
+        @errDetail = "The most recently updated routine has no usable 'title'."
+    }
+}
+
+// --- Fetch exercise templates (primary muscle groups) ---
+if !@errMsg {
+    @templatesJson = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{@apiKey}"})
+    if !@templatesJson {
+        @errStage = "fetch-templates"
+        @errMsg = "Exercise templates request returned no data"
+        @errDetail = "GET /v1/exercise_templates came back empty. Check your network connection."
+    }
+}
+if !@errMsg {
+    @templatesDict = getDictionary(@templatesJson)
+    if !@templatesDict {
+        @errStage = "parse-templates"
+        @errMsg = "Templates response is not valid JSON"
+        @errDetail = "The /v1/exercise_templates response could not be parsed as JSON."
+    }
+}
+if !@errMsg {
+    @templates = @templatesDict['exercise_templates']
+    // A missing/empty templates list is tolerated: every exercise is then
+    // grouped under "other" instead of failing the whole run.
+}
+
+// --- Per-exercise: working sets + best Epley 1RM ---
+if !@errMsg {
+    @exercises = @routine['exercises']
+    @wsDict = {}
+    @muscleOrder = ""
+    @wsSep = ""
+    @wsEntries = ""
+    @wsESep = ""
+    @rmJson = ""
+    @rmSep = ""
+    @seenTids = "|"
+
+    for ex in @exercises {
+        @tid = "{@ex['exercise_template_id']}"
+
+        // Primary muscle group for this template ("other" on miss).
+        @muscle = "other"
+        for t in @templates {
+            @tid2 = "{@t['id']}"
+            if @tid2 == @tid {
+                @pmg = "{@t['primary_muscle_group']}"
+                if @pmg {
+                    @muscle = @pmg
+                }
+            }
+        }
+
+        // Working sets prescribed in the routine (warmup excluded).
+        // Counted for EVERY occurrence, even duplicate exercises.
+        @sets = @ex['sets']
+        @wsCount = 0
+        for s in @sets {
+            @stype = "{@s['type']}"
+            if @okTypes contains ",{@stype}," {
+                @wsCount = @wsCount + 1
+            }
+        }
+        @curVal = getValue(@wsDict, @muscle)
+        if @curVal {
+            @curTxt = "{@curVal}"
+            @curNum = number(@curTxt)
+        } else {
+            @curNum = 0
+            @muscleOrder = "{@muscleOrder}{@wsSep}{@muscle}"
+            @wsSep = ","
+        }
+        @newCount = @curNum + @wsCount
+        @wsDict = setValue(@wsDict, @muscle, "{@newCount}")
+
+        // Best Epley 1RM from this exercise's history.
+        // History is fetched once per template id (deduplicated).
+        @dup = 0
+        if @tid {
+            if @seenTids contains "|{@tid}|" {
+                @dup = 1
+            } else {
+                @seenTids = "{@seenTids}{@tid}|"
+            }
+        }
+        if @dup == 0 {
+            if @tid {
+                @best = 0
+                @historyJson = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@tid}?page=1&pageSize=100", {"api-key": "{@apiKey}"})
+                if @historyJson {
+                    @historyDict = getDictionary(@historyJson)
+                    if @historyDict {
+                        @entries = @historyDict['exercise_history']
+                        for e in @entries {
+                            @wTxt = "{@e['weight_kg']}"
+                            @rTxt = "{@e['reps']}"
+                            @hType = "{@e['set_type']}"
+                            if @okTypes contains ",{@hType}," {
+                                @wNum = number(@wTxt)
+                                @rNum = number(@rTxt)
+                                if @wNum > 0 {
+                                    if @rNum >= 1 {
+                                        if @rNum <= 30 {
+                                            if @rNum == 1 {
+                                                // "* 1" keeps the number type: a bare
+                                                // "@est = @wNum" copy loses it in Cherri.
+                                                @est = @wNum * 1
+                                            } else {
+                                                @est = @wNum * (1 + @rNum / 30)
+                                            }
+                                            if @est > @best {
+                                                @best = @est
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if @best > 0 {
+                    @bestR = round(@best, "Tenths")
+                    @title = "{@ex['title']}"
+                    if !@title {
+                        @title = @tid
+                    }
+                    @safeTitle = replaceText("\\", "\\\\", @title)
+                    @safeTitle = replaceText("\"", "\\\"", @safeTitle)
+                    @rmJson = "{@rmJson}{@rmSep}\"{@safeTitle}\": {@bestR}"
+                    @rmSep = ", "
+                }
+            }
+        }
+    }
+
+    // Working-sets entries, in first-seen muscle order.
+    if @muscleOrder {
+        @muscleList = splitText(@muscleOrder, ",")
+        for m in @muscleList {
+            if @m {
+                @mCount = getValue(@wsDict, @m)
+                @safeMuscle = replaceText("\\", "\\\\", @m)
+                @safeMuscle = replaceText("\"", "\\\"", @safeMuscle)
+                @wsEntries = "{@wsEntries}{@wsESep}\"{@safeMuscle}\": {@mCount}"
+                @wsESep = ", "
+            }
+        }
+    }
+
+    @safeRoutineName = replaceText("\\", "\\\\", @routineName)
+    @safeRoutineName = replaceText("\"", "\\\"", @safeRoutineName)
+    @resultJson = "{@ob}\"routineName\": \"{@safeRoutineName}\", \"workingSetsPerMuscleGroup\": {@ob}{@wsEntries}{@cb}, \"oneRepMaxKgPerExercise\": {@ob}{@rmJson}{@cb}{@cb}"
+}
+
+// --- Error payload (built always; used only on the error branch) ---
+@safeErrMsg = replaceText("\\", "\\\\", @errMsg)
+@safeErrMsg = replaceText("\"", "\\\"", @safeErrMsg)
+@safeErrDetail = replaceText("\\", "\\\\", @errDetail)
+@safeErrDetail = replaceText("\"", "\\\"", @safeErrDetail)
+@errJson = "{@ob}\"_error\": \"{@safeErrMsg}\", \"_context\": {@ob}\"stage\": \"{@errStage}\", \"detail\": \"{@safeErrDetail}\"{@cb}{@cb}"
+
+// --- Terminal: the shortcut ALWAYS outputs a dictionary ---
+if @errMsg {
+    show("Hevy Stats error: {@errMsg} ({@errDetail})")
+    @finalJson = @errJson
+} else {
+    @finalJson = @resultJson
+}
+@finalResult = getDictionary(@finalJson)
+if !@finalResult {
+    show("Hevy Stats internal error: the result could not be parsed as a dictionary. Raw output: {@finalJson}")
+}
