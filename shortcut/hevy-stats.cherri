@@ -282,12 +282,16 @@ if @errFlag == 0 {
 
 // --- Output: always a dictionary ---
 // Two separate explicit checks (no else, no truthiness): exactly one runs.
+// NOTE: `show()` is Show Result — the only way a manually-run shortcut
+// displays anything. The success branch MUST show, otherwise a good run
+// ends with no visible response (found by device testing, Sep 30 2026).
 if @errFlag == 1 {
     show("Hevy Stats error: {@errMsg} ({@errDetail})")
     @finalJson = @errJson
 }
 if @errFlag == 0 {
     @finalJson = @resultJson
+    show("{@finalJson}")
 }
 @finalResult = getDictionary(@finalJson)
 @finalTxt = "{@finalJson}"
