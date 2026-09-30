@@ -19,6 +19,14 @@
 //   - the first routine returned by the API is treated as most recently
 //     updated.
 //
+// IMPORTANT: bare truthiness checks (`if @x` / `if !@x`) are NOT used
+// anywhere here. Device testing (Sep 30, 2026) showed they misbehave —
+// an empty error message reached the error notification, which is only
+// possible if the truthiness conditions evaluate incorrectly at runtime
+// (inverted 100/101 "has any value" conditions, or empty strings counting
+// as having a value). All emptiness checks use explicit `== @empty` / `!= @empty`
+// comparisons and the error state uses a numeric flag.
+//
 // NOTE: Get Contents of URL halts the shortcut with a system error on HTTP
 // or network failures (e.g. a wrong API key -> 401); Shortcuts offers no
 // try/catch for that. Everything else is handled below.
@@ -29,25 +37,32 @@
 #define name HevyStats
 
 @apiKey = "{ShortcutInput}"
+// Numeric error flag (0 = ok, 1 = error). Never tested with truthiness.
+@errFlag = 0
 @errMsg = ""
 @errDetail = ""
 @errStage = ""
+// Empty-text sentinel: Cherri only allows == / != between two variables.
+@empty = ""
 // Literal braces for hand-built JSON (single-quoted = raw, no interpolation).
 @ob = '{'
 @cb = '}'
 // Working-set types, comma-padded so `contains` matches whole types only.
 @okTypes = ",normal,failure,dropset,"
 
-if !@apiKey {
+if @apiKey == @empty {
+    @errFlag = 1
     @errStage = "read-input"
     @errMsg = "Missing API key"
     @errDetail = "Shortcut Input was empty. Pass your Hevy API key as the shortcut input."
 }
 
 // --- Fetch routines ---
-if !@errMsg {
+if @errFlag == 0 {
     @routinesJson = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{@apiKey}"})
-    if !@routinesJson {
+    @routinesTxt = "{@routinesJson}"
+    if @routinesTxt == @empty {
+        @errFlag = 1
         @errStage = "fetch-routines"
         @errMsg = "Routines request returned no data"
         @errDetail = "GET /v1/routines came back empty. Check your network connection."
@@ -55,27 +70,22 @@ if !@errMsg {
 }
 
 // --- Parse routines ---
-if !@errMsg {
+if @errFlag == 0 {
     @routinesDict = getDictionary(@routinesJson)
-    if !@routinesDict {
-        @errStage = "parse-routines"
-        @errMsg = "Routines response is not valid JSON"
-        @errDetail = "The /v1/routines response could not be parsed as JSON."
-    }
-}
-if !@errMsg {
     @routinesList = @routinesDict['routines']
     @nRoutines = count(@routinesList)
     if @nRoutines == 0 {
+        @errFlag = 1
         @errStage = "parse-routines"
-        @errMsg = "No routines found"
-        @errDetail = "The /v1/routines response contained zero routines. Check that the API key is correct and Hevy Pro is active."
+        @errMsg = "No usable routines in response"
+        @errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active."
     }
 }
-if !@errMsg {
+if @errFlag == 0 {
     @routine = getFirstItem(@routinesList)
     @routineName = "{@routine['title']}"
-    if !@routineName {
+    if @routineName == @empty {
+        @errFlag = 1
         @errStage = "parse-routines"
         @errMsg = "First routine has no title"
         @errDetail = "The most recently updated routine has no usable 'title'."
@@ -83,30 +93,25 @@ if !@errMsg {
 }
 
 // --- Fetch exercise templates (primary muscle groups) ---
-if !@errMsg {
+if @errFlag == 0 {
     @templatesJson = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{@apiKey}"})
-    if !@templatesJson {
+    @templatesTxt = "{@templatesJson}"
+    if @templatesTxt == @empty {
+        @errFlag = 1
         @errStage = "fetch-templates"
         @errMsg = "Exercise templates request returned no data"
         @errDetail = "GET /v1/exercise_templates came back empty. Check your network connection."
     }
 }
-if !@errMsg {
+if @errFlag == 0 {
     @templatesDict = getDictionary(@templatesJson)
-    if !@templatesDict {
-        @errStage = "parse-templates"
-        @errMsg = "Templates response is not valid JSON"
-        @errDetail = "The /v1/exercise_templates response could not be parsed as JSON."
-    }
-}
-if !@errMsg {
     @templates = @templatesDict['exercise_templates']
     // A missing/empty templates list is tolerated: every exercise is then
     // grouped under "other" instead of failing the whole run.
 }
 
 // --- Per-exercise: working sets + best Epley 1RM ---
-if !@errMsg {
+if @errFlag == 0 {
     @exercises = @routine['exercises']
     @wsDict = {}
     @muscleOrder = ""
@@ -126,7 +131,7 @@ if !@errMsg {
             @tid2 = "{@t['id']}"
             if @tid2 == @tid {
                 @pmg = "{@t['primary_muscle_group']}"
-                if @pmg {
+                if @pmg != @empty {
                     @muscle = @pmg
                 }
             }
@@ -143,13 +148,13 @@ if !@errMsg {
             }
         }
         @curVal = getValue(@wsDict, @muscle)
-        if @curVal {
-            @curTxt = "{@curVal}"
-            @curNum = number(@curTxt)
-        } else {
+        @curTxt = "{@curVal}"
+        if @curTxt == @empty {
             @curNum = 0
             @muscleOrder = "{@muscleOrder}{@wsSep}{@muscle}"
             @wsSep = ","
+        } else {
+            @curNum = number(@curTxt)
         }
         @newCount = @curNum + @wsCount
         @wsDict = setValue(@wsDict, @muscle, "{@newCount}")
@@ -157,7 +162,7 @@ if !@errMsg {
         // Best Epley 1RM from this exercise's history.
         // History is fetched once per template id (deduplicated).
         @dup = 0
-        if @tid {
+        if @tid != @empty {
             if @seenTids contains "|{@tid}|" {
                 @dup = 1
             } else {
@@ -165,33 +170,32 @@ if !@errMsg {
             }
         }
         if @dup == 0 {
-            if @tid {
+            if @tid != @empty {
                 @best = 0
                 @historyJson = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@tid}?page=1&pageSize=100", {"api-key": "{@apiKey}"})
-                if @historyJson {
+                @historyTxt = "{@historyJson}"
+                if @historyTxt != @empty {
                     @historyDict = getDictionary(@historyJson)
-                    if @historyDict {
-                        @entries = @historyDict['exercise_history']
-                        for e in @entries {
-                            @wTxt = "{@e['weight_kg']}"
-                            @rTxt = "{@e['reps']}"
-                            @hType = "{@e['set_type']}"
-                            if @okTypes contains ",{@hType}," {
-                                @wNum = number(@wTxt)
-                                @rNum = number(@rTxt)
-                                if @wNum > 0 {
-                                    if @rNum >= 1 {
-                                        if @rNum <= 30 {
-                                            if @rNum == 1 {
-                                                // "* 1" keeps the number type: a bare
-                                                // "@est = @wNum" copy loses it in Cherri.
-                                                @est = @wNum * 1
-                                            } else {
-                                                @est = @wNum * (1 + @rNum / 30)
-                                            }
-                                            if @est > @best {
-                                                @best = @est
-                                            }
+                    @entries = @historyDict['exercise_history']
+                    for e in @entries {
+                        @wTxt = "{@e['weight_kg']}"
+                        @rTxt = "{@e['reps']}"
+                        @hType = "{@e['set_type']}"
+                        if @okTypes contains ",{@hType}," {
+                            @wNum = number(@wTxt)
+                            @rNum = number(@rTxt)
+                            if @wNum > 0 {
+                                if @rNum >= 1 {
+                                    if @rNum <= 30 {
+                                        if @rNum == 1 {
+                                            // "* 1" keeps the number type: a bare
+                                            // "@est = @wNum" copy loses it in Cherri.
+                                            @est = @wNum * 1
+                                        } else {
+                                            @est = @wNum * (1 + @rNum / 30)
+                                        }
+                                        if @est > @best {
+                                            @best = @est
                                         }
                                     }
                                 }
@@ -202,7 +206,7 @@ if !@errMsg {
                 if @best > 0 {
                     @bestR = round(@best, "Tenths")
                     @title = "{@ex['title']}"
-                    if !@title {
+                    if @title == @empty {
                         @title = @tid
                     }
                     @safeTitle = replaceText("\\", "\\\\", @title)
@@ -215,16 +219,16 @@ if !@errMsg {
     }
 
     // Working-sets entries, in first-seen muscle order.
-    if @muscleOrder {
-        @muscleList = splitText(@muscleOrder, ",")
-        for m in @muscleList {
-            if @m {
-                @mCount = getValue(@wsDict, @m)
-                @safeMuscle = replaceText("\\", "\\\\", @m)
-                @safeMuscle = replaceText("\"", "\\\"", @safeMuscle)
-                @wsEntries = "{@wsEntries}{@wsESep}\"{@safeMuscle}\": {@mCount}"
-                @wsESep = ", "
-            }
+    // (splitText on an empty string yields nothing usable; the inner
+    // `!= ""` guard skips it, so no outer emptiness check is needed.)
+    @muscleList = splitText(@muscleOrder, ",")
+    for m in @muscleList {
+        if @m != @empty {
+            @mCount = getValue(@wsDict, @m)
+            @safeMuscle = replaceText("\\", "\\\\", @m)
+            @safeMuscle = replaceText("\"", "\\\"", @safeMuscle)
+            @wsEntries = "{@wsEntries}{@wsESep}\"{@safeMuscle}\": {@mCount}"
+            @wsESep = ", "
         }
     }
 
@@ -238,16 +242,19 @@ if !@errMsg {
 @safeErrMsg = replaceText("\"", "\\\"", @safeErrMsg)
 @safeErrDetail = replaceText("\\", "\\\\", @errDetail)
 @safeErrDetail = replaceText("\"", "\\\"", @safeErrDetail)
-@errJson = "{@ob}\"_error\": \"{@safeErrMsg}\", \"_context\": {@ob}\"stage\": \"{@errStage}\", \"detail\": \"{@safeErrDetail}\"{@cb}{@cb}"
+@errJson = "{@ob}\"_error\": \"{@safeErrMsg}\", \"_context\": {@ob}\"stage\": \"{@errStage}\", \"detail\": \"{@safeErrDetail}\" {@cb}{@cb}"
 
-// --- Terminal: the shortcut ALWAYS outputs a dictionary ---
-if @errMsg {
+// --- Output: always a dictionary ---
+// Two separate explicit checks (no else, no truthiness): exactly one runs.
+if @errFlag == 1 {
     show("Hevy Stats error: {@errMsg} ({@errDetail})")
     @finalJson = @errJson
-} else {
+}
+if @errFlag == 0 {
     @finalJson = @resultJson
 }
 @finalResult = getDictionary(@finalJson)
-if !@finalResult {
-    show("Hevy Stats internal error: the result could not be parsed as a dictionary. Raw output: {@finalJson}")
+@finalTxt = "{@finalJson}"
+if @finalTxt == @empty {
+    show("Hevy Stats: internal error, empty result (this should never happen).")
 }
