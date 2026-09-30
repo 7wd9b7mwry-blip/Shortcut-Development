@@ -72,6 +72,10 @@ function runNative(apiKey, api) {
       errStage = "parse-routines";
       errMsg = "No usable routines in response";
       errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active.";
+      const apiMsgTxt = txt(routinesDict["message"]);
+      if (apiMsgTxt !== "") {
+        errDetail = "The Hevy API itself reported an error: " + apiMsgTxt;
+      }
     }
   }
   if (errFlag === 0) {
@@ -295,6 +299,15 @@ check("error: zero routines", function () {
   var api = happyApi(); api.routines = JSON.stringify({ routines: [] });
   var r = runNative("KEY", api);
   assert.strictEqual(r.result._error, "No usable routines in response");
+  assert.ok(r.result._context.detail.indexOf("no routines list") >= 0);
+});
+check("error: API-side message is surfaced", function () {
+  var api = happyApi();
+  api.routines = JSON.stringify({ message: "Invalid API key", routines: [] });
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result._error, "No usable routines in response");
+  assert.strictEqual(r.result._context.detail, "The Hevy API itself reported an error: Invalid API key");
+  assert.ok(r.notifications[0].indexOf("Invalid API key") >= 0);
 });
 check("error: templates not JSON -> throws (system-level, like halt)", function () {
   var api = happyApi(); api.templates = "garbage{";
