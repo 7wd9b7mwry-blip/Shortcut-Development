@@ -20,7 +20,8 @@
 
 // --- 1. Fetch routines (most recently updated first) ---
 @routinesResp = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{ShortcutInput}"})
-@routines = @routinesResp['routines']
+@routinesDict = getDictionary(@routinesResp)
+@routines = @routinesDict['routines']
 @routineCount = count(@routines)
 if @routineCount == 0 {
     show("Hevy API request failed. Check that your API key is correct and Hevy Pro is active (find the key in the Hevy app under Settings).")
@@ -55,7 +56,8 @@ for ex in @routineExercises {
 for ex2 in @routineExercises {
     @ex2Tid = @ex2['exercise_template_id']
     @histResp = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@ex2Tid}?page=1&pageSize=100", {"api-key": "{ShortcutInput}"})
-    @entries = @histResp['exercise_history']
+    @histDict = getDictionary(@histResp)
+    @entries = @histDict['exercise_history']
     for e in @entries {
         @ew = @e['weight_kg']
         @er = @e['reps']
@@ -66,7 +68,8 @@ for ex2 in @routineExercises {
 
 // --- 4. Exercise templates (template ID -> primary muscle group) ---
 @templatesResp = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{ShortcutInput}"})
-@templates = @templatesResp['exercise_templates']
+@templatesDict = getDictionary(@templatesResp)
+@templates = @templatesDict['exercise_templates']
 @templatesFrag = ""
 for t in @templates {
     @tId = @t['id']
