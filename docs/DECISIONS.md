@@ -2,6 +2,20 @@
 
 Judgment calls made while building the Hevy Stats shortcut. The user asked for "working sets per muscle group", "1RPM per exercise", and "routine name" with the Hevy API as input; the specifics below are my interpretations.
 
+## Two-pass architecture (no dictionary access on API responses)
+
+The shortcut never calls Get Dictionary on a Hevy API response. All JSON parsing and validation lives in `src/hevy-stats.js`:
+
+- **Pass 1 ("ids")**: routines JSON (raw, base64) → JS parses, validates, returns comma-separated exercise template IDs.
+- **I/O**: shortcut fetches each exercise history JSON + templates JSON as raw text (base64, no parsing).
+- **Pass 2 ("stats")**: JS parses all JSON, validates structure, computes stats.
+
+This eliminated the repetitive getDictionary → key-access pattern that was causing problems. Dictionary access in Shortcuts actions is limited to the two JS outputs. All parsing is testable in Node (see `test/run-tests.js`).
+
+## Strong error handling
+
+Every parser in `src/hevy-stats.js` validates its input and throws `HevyError` with a specific message plus a context object describing relevant state (e.g., which template ID, what keys were present, a preview of malformed JSON). `deviceMain` catches these and returns `{"_error", "_context"}`. Each shortcut pass checks for `_error` and shows a notification with the message and details, then stops. No silent failures.
+
 ## "1RPM" → estimated 1RM (Epley)
 
 "1RPM" is read as **estimated one-rep max**. There is no standard "1RPM" metric in strength training; 1RM is the standard. The estimate uses the **Epley formula**:
@@ -34,7 +48,7 @@ A history set qualifies for 1RM estimation only if:
 
 ## Titles with special characters
 
-Routine and exercise titles are **URL-encoded** by the shortcut before being embedded in the JavaScript, then decoded by the JS. This means quotes, backslashes, newlines, and unicode in custom names cannot break the generated code.
+API JSON is passed to the JavaScript as **base64** (never interpolated as text), so quotes, backslashes, newlines, and unicode in routine/exercise titles cannot break the generated code. The JS decodes base64 via `atob` + `TextDecoder` for correct UTF-8 handling.
 
 ## API key handling
 
