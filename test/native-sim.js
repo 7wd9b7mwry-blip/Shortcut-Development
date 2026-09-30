@@ -6,6 +6,11 @@
 // misbehave at runtime), comma-padded `contains` for set types, text
 // round-trip for setValue numbers, and hand-built JSON with escaping.
 //
+// NOTE: the sim uses direct property access (`d["key"]`) for the Cherri
+// `getValue(@d, "key")` calls — same semantics. The `@d['key']` subscript
+// spelling must NOT be used in the .cherri source: Cherri 2.3.0 silently
+// compiles it to a plain variable copy (verified Sep 30, 2026).
+//
 // Run: node test/native-sim.js
 "use strict";
 
