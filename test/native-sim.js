@@ -23,13 +23,17 @@ function load(name) {
   return JSON.parse(fs.readFileSync(path.join(FIX, name), "utf8"));
 }
 
-// Shortcuts semantics: number("  ") -> 0? Here we mirror the template's
-// usage: number() is only called on values already known non-empty.
-function toNumber(txt) {
-  var t = String(txt == null ? "" : txt).trim();
-  if (t === "") return 0;
-  var n = Number(t);
-  return isNaN(n) ? 0 : n;
+// Device-faithful: Shortcuts' Number action FAILS on empty or non-numeric
+// text instead of returning 0. The template therefore only calls number()
+// on text already checked non-empty; an unguarded call surfaces here as a
+// loud test failure — exactly like the Sep 30 device failure on null
+// weight_kg in bodyweight history.
+function toNumber(t) {
+  var s = String(t).trim();
+  if (s === "") throw new Error("Number: could not convert empty text");
+  var n = Number(s);
+  if (isNaN(n)) throw new Error("Number: could not convert text: " + s);
+  return n;
 }
 function txt(v) {
   return v == null ? "" : String(v);
@@ -166,8 +170,13 @@ function runNative(apiKey, api) {
         entries.forEach(function (e) {
           var hType = txt(e.set_type);
           if (OK_TYPES.indexOf("," + hType + ",") < 0) return;
-          var wNum = toNumber(txt(e.weight_kg));
-          var rNum = toNumber(txt(e.reps));
+          // Mirrors the template: number() only on non-empty text.
+          var wTxt = txt(e.weight_kg);
+          var wNum = 0;
+          if (wTxt !== "") wNum = toNumber(wTxt);
+          var rTxt = txt(e.reps);
+          var rNum = 0;
+          if (rTxt !== "") rNum = toNumber(rTxt);
           if (!(wNum > 0)) return;
           if (!(rNum >= 1)) return;
           if (!(rNum <= 30)) return;
@@ -351,6 +360,21 @@ check("edge: no history -> no 1RMs", function () {
   var api = happyApi(); api.history = {};
   var r = runNative("KEY", api);
   assert.deepStrictEqual(r.result.oneRepMaxKgPerExercise, {});
+  assert.strictEqual(r.result.workingSetsPerMuscleGroup.chest, 5);
+});
+check("edge: null weight_kg (bodyweight) never reaches number()", function () {
+  // Regression: Sep 30 device failure — Shortcuts' Number action fails on
+  // empty text; bodyweight history has weight_kg: null. Must not throw and
+  // must simply omit the exercise from 1RMs.
+  var api = happyApi();
+  api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" },
+    { weight_kg: null, reps: 10, set_type: "normal" },
+    { weight_kg: null, reps: null, set_type: "normal" }
+  ]});
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.notifications.length, 0);
+  assert.ok(!("Bench Press (Barbell)" in r.result.oneRepMaxKgPerExercise));
   assert.strictEqual(r.result.workingSetsPerMuscleGroup.chest, 5);
 });
 check("edge: empty exercises", function () {
