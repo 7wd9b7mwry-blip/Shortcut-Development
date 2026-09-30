@@ -1,3 +1,4 @@
+#define name Hevy Stats
 // Hevy Stats — native Shortcuts actions (no JavaScript, no HTML).
 //
 // Input:  Hevy API key passed as Shortcut Input (never prompted).
@@ -206,8 +207,18 @@ if @errFlag == 0 {
                         @hTypeVal = getValue(@eDict, "set_type")
                         @hType = "{@hTypeVal}"
                         if @okTypes contains ",{@hType}," {
-                            @wNum = number(@wTxt)
-                            @rNum = number(@rTxt)
+                            // number() fails on empty text on-device (e.g.
+                            // bodyweight history has null weight_kg), so it
+                            // is only called on non-empty text; missing ->
+                            // 0, which the > 0 / >= 1 guards then skip.
+                            @wNum = 0
+                            if @wTxt != @empty {
+                                @wNum = number(@wTxt)
+                            }
+                            @rNum = 0
+                            if @rTxt != @empty {
+                                @rNum = number(@rTxt)
+                            }
                             if @wNum > 0 {
                                 if @rNum >= 1 {
                                     if @rNum <= 30 {
