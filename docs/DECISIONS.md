@@ -175,3 +175,29 @@ Test hardening (same session, at Daniel's suggestion):
 - HubSign can be flaky: on Sep 30, 2026 ~19:25 EDT it began timing out on
   POST /sign (host up, 404 on root; signing worker hanging). Retry loop
   approach works; do not mistake the Go panic for a source error.
+
+## FIX 6 (Sep 30, 2026): per-exercise single-template fetch (Pull Up grouped under "other")
+
+Daniel's run showed `workingSetsPerMuscleGroup: {chest: 3, other: 3}` with no
+Pull Up label, and no Pull Up 1RM. Investigation against his real API data:
+
+1. The "other: 3" entries ARE his Pull Up working sets. The shortcut fetched
+   only templates page 1 (100 entries); his Pull Up template id (1B2B1E7C)
+   sits past page 1, so the lookup missed and fell back to "other" per the
+   old design. Verified: `primary_muscle_group` (not `muscle_group`) is the
+   correct field; Bench Press resolved to "chest" from page 1.
+2. Pull Up has no 1RM because all 3 history entries are bodyweight
+   (`weight_kg: null`, reps 12/11/10). Epley needs a weight; per the
+   documented design (weight > 0 required) it is omitted. This is correct
+   behavior, not a bug — explained to Daniel.
+
+Fix: dropped the bulk page-1 templates fetch entirely. Each routine exercise
+now resolves its muscle group via `GET /v1/exercise_templates/{id}` (returns
+the ExerciseTemplate object directly per Hevy's OpenAPI spec — confirmed from
+the embedded spec in api.hevyapp.com/docs/swagger-ui-init.js). One tiny call
+per exercise, no pages to miss. "other" remains the fallback when the fetch
+misses. 372 actions (was 400). native-sim.js: 20 tests (new regression
+"template past page 1 resolves via single endpoint"); real-fixtures-check
+mocks the Pull Up single-template response as "lats" (assumed — the device
+run reports the real value; update the mock if different). Re-signed,
+re-pushed, re-delivered.
