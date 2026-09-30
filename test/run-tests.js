@@ -6,9 +6,7 @@ var stats = require("../src/hevy-stats.js");
 var failures = 0;
 
 function fixture(name) {
-  return JSON.parse(
-    fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8")
-  );
+  return fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8");
 }
 
 function check(name, actual, expected) {
@@ -34,133 +32,239 @@ function checkClose(name, actual, expected, tol) {
   }
 }
 
-// --- push-day fixture ---
-var push = stats.computeStats(fixture("push-day.json"));
+function checkThrows(name, fn, expectedMsgPart) {
+  try {
+    fn();
+    failures++;
+    console.log("FAIL " + name + " (expected throw, got success)");
+  } catch (e) {
+    var msg = (e && e.message) || String(e);
+    if (msg.indexOf(expectedMsgPart) >= 0) {
+      console.log("ok   " + name);
+    } else {
+      failures++;
+      console.log("FAIL " + name);
+      console.log("  expected message containing: " + expectedMsgPart);
+      console.log("  actual message: " + msg);
+    }
+    // HevyError must carry a context object with relevant state.
+    if (e && e.name === "HevyError" && e.context && typeof e.context === "object") {
+      console.log("ok   " + name + " (has context)");
+    } else {
+      failures++;
+      console.log("FAIL " + name + " (missing HevyError context)");
+    }
+  }
+}
 
-check("routineName passes through", push.routineName, "Push Day");
+// --- Parser: routines ---
+var routine = stats.parseRoutinesResponse(fixture("api-routines.json"));
+check("parse routines: name", routine.routineName, "Push Day");
+check("parse routines: exercise count", routine.exercises.length, 5);
+check("parse routines: first exercise", routine.exercises[0], {
+  templateId: "tpl-bench",
+  title: "Bench Press (Barbell)",
+  setTypes: ["warmup", "normal", "normal", "normal", "failure"]
+});
 
-// Working sets: bench has warmup+3x normal+failure (x2 entries: 4+1), ohp 2x normal+dropset,
-// triceps 2x normal, missing-template 2x normal.
-// bench: entry1 -> 4 working (3 normal + 1 failure), entry2 -> 1 working => 5 chest
-// ohp: 3 working => shoulders 3; triceps: 2; missing template => other 2
-check("workingSetsPerMuscleGroup", push.workingSetsPerMuscleGroup, {
+// --- Parser: templates ---
+var muscles = stats.parseTemplatesResponse(fixture("api-templates.json"));
+check("parse templates", muscles, {
+  "tpl-bench": "chest",
+  "tpl-ohp": "shoulders",
+  "tpl-tri": "triceps"
+});
+
+// --- Parser: history ---
+var benchHist = stats.parseHistoryResponse(fixture("api-history-bench.json"), "tpl-bench");
+check("parse history: count", benchHist.length, 8);
+check("parse history: first entry", benchHist[0], {
+  templateId: "tpl-bench",
+  weightKg: 100,
+  reps: 5,
+  setType: "normal"
+});
+check("parse history: null weight preserved", benchHist[5].weightKg, null);
+
+// --- Parser error cases ---
+checkThrows("routines: malformed JSON",
+  function () { stats.parseRoutinesResponse("not json{{{"); },
+  "not valid JSON");
+
+checkThrows("routines: missing routines key",
+  function () { stats.parseRoutinesResponse('{"foo": []}'); },
+  "no 'routines' array");
+
+checkThrows("routines: empty routines",
+  function () { stats.parseRoutinesResponse('{"routines": []}'); },
+  "zero routines");
+
+checkThrows("routines: missing title",
+  function () { stats.parseRoutinesResponse('{"routines": [{"exercises": []}]}'); },
+  "no usable 'title'");
+
+checkThrows("routines: missing exercises",
+  function () { stats.parseRoutinesResponse('{"routines": [{"title": "X"}]}'); },
+  "no 'exercises' array");
+
+checkThrows("routines: exercise missing template id",
+  function () {
+    stats.parseRoutinesResponse('{"routines": [{"title": "X", "exercises": [{"title": "Y"}]}]}');
+  },
+  "no 'exercise_template_id'");
+
+checkThrows("templates: malformed JSON",
+  function () { stats.parseTemplatesResponse("{{{"); },
+  "not valid JSON");
+
+checkThrows("templates: missing key",
+  function () { stats.parseTemplatesResponse('{"other": []}'); },
+  "no 'exercise_templates' array");
+
+checkThrows("history: malformed JSON",
+  function () { stats.parseHistoryResponse("{{{", "tpl-x"); },
+  "not valid JSON");
+
+checkThrows("history: missing key",
+  function () { stats.parseHistoryResponse('{"other": []}', "tpl-x"); },
+  "no 'exercise_history' array");
+
+// --- Full pipeline: parse all -> computeStats ---
+function runPipeline() {
+  var r = stats.parseRoutinesResponse(fixture("api-routines.json"));
+  var m = stats.parseTemplatesResponse(fixture("api-templates.json"));
+  // History parts aligned by index with routine.exercises (as the shortcut does).
+  var histFiles = [
+    "api-history-bench.json",
+    "api-history-ohp.json",
+    "api-history-tri.json",
+    "api-history-bench.json", // tpl-bench appears twice
+    "api-history-missing.json"
+  ];
+  var entries = [];
+  for (var i = 0; i < histFiles.length; i++) {
+    var tid = r.exercises[i].templateId;
+    var parsed = stats.parseHistoryResponse(fixture(histFiles[i]), tid);
+    for (var j = 0; j < parsed.length; j++) {
+      entries.push(parsed[j]);
+    }
+  }
+  return stats.computeStats({ routine: r, muscleByTemplate: m, historyEntries: entries });
+}
+
+var push = runPipeline();
+check("pipeline routineName", push.routineName, "Push Day");
+check("pipeline working sets", push.workingSetsPerMuscleGroup, {
   chest: 5,
   shoulders: 3,
   triceps: 2,
   other: 2
 });
-
-// 1RM bench: candidates: 100x5 -> 116.67, 102.5x3 -> 112.75, 110x1 -> 110.
-// warmup excluded, 0/null weight excluded, null reps excluded, 40 reps excluded.
-checkClose(
-  "1RM bench (Epley best = 100x5)",
-  push.oneRepMaxKgPerExercise["Bench Press (Barbell)"],
-  116.7
-);
-// ohp: 40x8 -> 50.67, 42.5x6 -> 51.0 (failure counts)
-checkClose(
-  "1RM ohp (failure set counts)",
-  push.oneRepMaxKgPerExercise["Overhead Press (Dumbbell)"],
-  51.0
-);
-// triceps: 30x12 -> 42.0
-checkClose(
-  "1RM triceps",
-  push.oneRepMaxKgPerExercise["Triceps Pushdown (Cable)"],
-  42.0
-);
-// missing template still gets a 1RM keyed by routine title
-checkClose(
-  "1RM unknown template uses routine title",
-  push.oneRepMaxKgPerExercise["Mystery Machine"],
-  93.3
-);
+checkClose("pipeline 1RM bench (100x5 -> 116.7)",
+  push.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 116.7);
+checkClose("pipeline 1RM ohp (42.5x6 failure -> 51.0)",
+  push.oneRepMaxKgPerExercise["Overhead Press (Dumbbell)"], 51.0);
+checkClose("pipeline 1RM triceps (30x12 -> 42.0)",
+  push.oneRepMaxKgPerExercise["Triceps Pushdown (Cable)"], 42.0);
+checkClose("pipeline 1RM missing template (70x10 -> 93.3)",
+  push.oneRepMaxKgPerExercise["Mystery Machine"], 93.3);
 
 // --- epley unit checks ---
 check("epley reps=1 returns weight", stats.epley1RM(110, 1), 110);
 checkClose("epley 100x5", stats.epley1RM(100, 5), 116.667);
 
-// --- empty routine ---
-var empty = stats.computeStats(fixture("empty.json"));
-check("empty routineName", empty.routineName, "Empty Routine");
-check("empty working sets", empty.workingSetsPerMuscleGroup, {});
-check("empty 1RM", empty.oneRepMaxKgPerExercise, {});
+// --- qualifiesFor1RM ---
+check("qualifies: warmup excluded", stats.qualifiesFor1RM(100, 5, "warmup"), false);
+check("qualifies: zero weight excluded", stats.qualifiesFor1RM(0, 5, "normal"), false);
+check("qualifies: null weight excluded", stats.qualifiesFor1RM(null, 5, "normal"), false);
+check("qualifies: 40 reps excluded", stats.qualifiesFor1RM(50, 40, "normal"), false);
+check("qualifies: normal ok", stats.qualifiesFor1RM(100, 5, "normal"), true);
+check("qualifies: failure ok", stats.qualifiesFor1RM(42.5, 6, "failure"), true);
+check("qualifies: dropset ok", stats.qualifiesFor1RM(30, 12, "dropset"), true);
 
-// --- unicode fixture ---
-var uni = stats.computeStats(fixture("unicode.json"));
-check("unicode routineName", uni.routineName, "Leg Day éè");
-check("unicode working sets", uni.workingSetsPerMuscleGroup, { quadriceps: 3 });
-checkClose("unicode 1RM squat (150x3 -> 165)", uni.oneRepMaxKgPerExercise["Back Squat (Barbell)"], 165.0);
-
-// --- deviceMain simulation: placeholder replacement + data-URL round trip ---
-// Simulates exactly what the shortcut does: substitute fragments into the JS
-// source, run it with a stubbed document, and decode the written payload.
-(function testDeviceRoundTrip() {
-  // Simulates exactly what the shortcut does: URL-encode titles (as Cherri's
-  // urlEncode does), substitute fragments into the JS source, run it with a
-  // stubbed document, and decode the written payload.
+// --- Two-pass device simulation ---
+// Simulates the shortcut: base64 JSONs -> placeholder substitution -> eval with
+// stubbed document/atob/TextDecoder -> decode written output.
+(function testDeviceTwoPass() {
   var src = fs.readFileSync(path.join(__dirname, "..", "src", "hevy-stats.js"), "utf8");
-  function frag(ex) {
-    return (
-      '["' + ex[0] + '","' + encodeURIComponent(ex[1]) + '",["' + ex[2].join('","') + '"]]'
-    );
+
+  function runPass(mode, routinesB64, templatesB64, historyB64) {
+    var page = src
+      .replace(/__MODE__/g, mode)
+      .replace(/__ROUTINES_B64__/g, routinesB64)
+      .replace(/__TEMPLATES_B64__/g, templatesB64 || "")
+      .replace(/__HISTORY_B64__/g, historyB64 || "");
+    var written = null;
+    var document = { write: function (s) { written = s; } };
+    var module = undefined;
+    // atob / TextDecoder stubs for Node.
+    var atob = function (b64) { return Buffer.from(b64, "base64").toString("binary"); };
+    var TextDecoder = function () {};
+    TextDecoder.prototype.decode = function (bytes) {
+      return Buffer.from(bytes).toString("utf8");
+    };
+    eval(page);
+    return JSON.parse(decodeURIComponent(written));
   }
-  var p = fixture("push-day.json");
-  var page = src
-    .replace("__ROUTINE_NAME__", encodeURIComponent(p.routineName))
-    .replace("__ROUTINE_EXERCISES__", p.routineExercises.map(frag).join(","))
-    .replace(
-      "__TEMPLATES__",
-      p.templates.map(function (t) { return '["' + t[0] + '","' + t[1] + '"]'; }).join(",")
-    )
-    .replace(
-      "__HISTORY_ENTRIES__",
-      p.historyEntries
-        .map(function (h) {
-          return '["' + h[0] + '","' + h[1] + '","' + h[2] + '","' + h[3] + '"]';
-        })
-        .join(",")
-    );
-  var written = null;
-  var document = { write: function (s) { written = s; } };
-  var module = undefined;
-  eval(page); // runs deviceMain via the document guard
-  var decoded = decodeURIComponent(written);
-  var result = JSON.parse(decoded);
-  check("device round trip: routineName", result.routineName, "Push Day");
-  check("device round trip: working sets", result.workingSetsPerMuscleGroup, {
-    chest: 5,
-    shoulders: 3,
-    triceps: 2,
-    other: 2
+
+  function b64(s) { return Buffer.from(s, "utf8").toString("base64"); }
+
+  var routinesB64 = b64(fixture("api-routines.json"));
+
+  // Pass 1: ids
+  var idsResult = runPass("ids", routinesB64);
+  check("device pass1: no error", idsResult._error, undefined);
+  check("device pass1: ids", idsResult.ids,
+    "tpl-bench,tpl-ohp,tpl-tri,tpl-bench,tpl-missing");
+
+  // Pass 2: stats
+  var templatesB64 = b64(fixture("api-templates.json"));
+  var histB64 = [
+    "api-history-bench.json", "api-history-ohp.json", "api-history-tri.json",
+    "api-history-bench.json", "api-history-missing.json"
+  ].map(function (f) { return b64(fixture(f)); }).join("|");
+  var statsResult = runPass("stats", routinesB64, templatesB64, histB64);
+  check("device pass2: no error", statsResult._error, undefined);
+  check("device pass2: routineName", statsResult.routineName, "Push Day");
+  check("device pass2: working sets", statsResult.workingSetsPerMuscleGroup, {
+    chest: 5, shoulders: 3, triceps: 2, other: 2
   });
-  checkClose(
-    "device round trip: 1RM bench",
-    result.oneRepMaxKgPerExercise["Bench Press (Barbell)"],
-    116.7
-  );
+  checkClose("device pass2: 1RM bench",
+    statsResult.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 116.7);
+
+  // Pass 1 error: malformed routines JSON
+  var errResult = runPass("ids", b64("not json{{{"));
+  check("device pass1 error: has _error", typeof errResult._error, "string");
+  check("device pass1 error: mentions JSON",
+    errResult._error.indexOf("not valid JSON") >= 0, true);
+  check("device pass1 error: has context", typeof errResult._context, "object");
 })();
 
-// --- tricky titles (quotes/backslashes survive via URL-encoding) ---
-(function testTrickyTitles() {
-  var src = fs.readFileSync(path.join(__dirname, "..", "src", "hevy-stats.js"), "utf8");
-  var p = fixture("tricky-titles.json");
-  var page = src
-    .replace("__ROUTINE_NAME__", encodeURIComponent(p.routineName))
-    .replace(
-      "__ROUTINE_EXERCISES__",
-      '[\"tpl-q\",\"' + encodeURIComponent(p.routineExercises[0][1]) + '\",[\"normal\",\"normal\"]]'
-    )
-    .replace("__TEMPLATES__", '[\"tpl-q\",\"quadriceps\"]')
-    .replace("__HISTORY_ENTRIES__", '[\"tpl-q\",\"80\",\"10\",\"normal\"]');
-  var written = null;
-  var document = { write: function (s) { written = s; } };
-  var module = undefined;
-  eval(page);
-  var result = JSON.parse(decodeURIComponent(written));
-  check("tricky routineName", result.routineName, 'Leg "Day" \\ Test');
-  check("tricky working sets", result.workingSetsPerMuscleGroup, { quadriceps: 2 });
-  checkClose("tricky 1RM", result['oneRepMaxKgPerExercise']['My "Special" \\ Leg (Day)'], 106.7);
+// --- Unicode through the full base64 pipeline ---
+(function testUnicode() {
+  var routinesJson = JSON.stringify({
+    routines: [{
+      title: "Leg Day éè",
+      exercises: [{
+        exercise_template_id: "tpl-squat",
+        title: "Back Squat (Barbell)",
+        sets: [{ type: "normal" }, { type: "normal" }, { type: "normal" }]
+      }]
+    }]
+  });
+  var templatesJson = JSON.stringify({
+    exercise_templates: [{ id: "tpl-squat", primary_muscle_group: "quadriceps" }]
+  });
+  var historyJson = JSON.stringify({
+    exercise_history: [{ weight_kg: 150, reps: 3, set_type: "normal" }]
+  });
+  var r = stats.parseRoutinesResponse(routinesJson);
+  var m = stats.parseTemplatesResponse(templatesJson);
+  var h = stats.parseHistoryResponse(historyJson, "tpl-squat");
+  var out = stats.computeStats({ routine: r, muscleByTemplate: m, historyEntries: h });
+  check("unicode routineName", out.routineName, "Leg Day éè");
+  check("unicode working sets", out.workingSetsPerMuscleGroup, { quadriceps: 3 });
+  checkClose("unicode 1RM", out.oneRepMaxKgPerExercise["Back Squat (Barbell)"], 165.0);
 })();
 
 if (failures > 0) {
