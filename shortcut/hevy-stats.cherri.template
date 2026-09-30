@@ -1,4 +1,4 @@
-// Hevy Stats — Cherri I/O shell.
+// Hevy Stats — Cherri I/O shell (two-pass).
 //
 // This file is a TEMPLATE. build/build.py:
 //   1. replaces __HEVY_STATS_JS_B64__ with the base64 of src/hevy-stats.js,
@@ -6,11 +6,18 @@
 //   3. sets WFWorkflowHasShortcutInputVariables so iOS knows the shortcut
 //      accepts input (the Hevy API key is passed as Shortcut Input).
 //
-// The shortcut fetches the user's most recently updated Hevy routine, its
-// exercise templates (for muscle groups), and each exercise's full history
-// (for estimated 1RM), then hands plain data fragments to the embedded
-// JavaScript core, which computes the stats. All analysis semantics live in
-// src/hevy-stats.js; this file only does I/O and fragment extraction.
+// Flow:
+//   Pass 1: downloadURL routines JSON (raw) -> JS extracts template IDs.
+//   I/O:    downloadURL each exercise history JSON (raw) + templates JSON (raw).
+//   Pass 2: JS parses all JSON, validates with specific errors, computes stats.
+//
+// The shortcut NEVER calls getDictionary on an API response. All JSON parsing
+// and validation lives in src/hevy-stats.js (testable in Node). Dictionary
+// access in Shortcuts actions is limited to the two JS outputs (IDs, result).
+//
+// Error handling: each JS pass returns {"_error", "_context"} on failure.
+// The shortcut shows a notification with the specific message and relevant
+// state, then stops. No silent failures.
 //
 // The Hevy API key is taken from Shortcut Input (not prompted).
 #include 'actions/web'
@@ -18,75 +25,62 @@
 #include 'actions/crypto'
 #define name HevyStats
 
-// --- 1. Fetch routines (most recently updated first) ---
-@routinesResp = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{ShortcutInput}"})
-@routinesDict = getDictionary(@routinesResp)
-@routines = @routinesDict['routines']
-@routineCount = count(@routines)
-if @routineCount == 0 {
-    show("Hevy API request failed. Check that your API key is correct and Hevy Pro is active (find the key in the Hevy app under Settings).")
-    stop()
-}
-@routine = getListItem(@routines, 1)
-@routineName = @routine['title']
-@routineNameEnc = urlEncode("{@routineName}")
-@routineExercises = @routine['exercises']
+@apiKey = "{ShortcutInput}"
 
-// --- 2. Routine-exercise fragments: ["templateId","urlEncodedTitle",["type",...]] ---
-@routineFrag = ""
-for ex in @routineExercises {
-    @exTid = @ex['exercise_template_id']
-    @exTitle = @ex['title']
-    @exTitleEnc = urlEncode("{@exTitle}")
-    @exSets = @ex['sets']
-    @typesText = ""
-    for s in @exSets {
-        @sType = @s['type']
-        @typesText = "{@typesText}\"{@sType}\","
-    }
-    @routineFrag = "{@routineFrag}[\"{@exTid}\",\"{@exTitleEnc}\",[{@typesText}]],"
-}
+// --- 1. Fetch routines JSON (raw text, no parsing) ---
+@routinesJson = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{@apiKey}"})
+@routinesB64 = base64Encode(@routinesJson)
 
-// --- 3. Exercise history per routine exercise (for estimated 1RM) ---
-// Fragments: ["templateId","weightKg","reps","setType",]. All values are
-// passed as strings; the JS core parses them with parseFloat/parseInt, so
-// null or missing weight/reps (interpolated as empty) safely become NaN and
-// are excluded by the qualification rules there.
-@historyFrag = ""
-for ex2 in @routineExercises {
-    @ex2Tid = @ex2['exercise_template_id']
-    @histResp = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@ex2Tid}?page=1&pageSize=100", {"api-key": "{ShortcutInput}"})
-    @histDict = getDictionary(@histResp)
-    @entries = @histDict['exercise_history']
-    for e in @entries {
-        @ew = @e['weight_kg']
-        @er = @e['reps']
-        @est = @e['set_type']
-        @historyFrag = "{@historyFrag}[\"{@ex2Tid}\",\"{@ew}\",\"{@er}\",\"{@est}\"],"
-    }
-}
-
-// --- 4. Exercise templates (template ID -> primary muscle group) ---
-@templatesResp = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{ShortcutInput}"})
-@templatesDict = getDictionary(@templatesResp)
-@templates = @templatesDict['exercise_templates']
-@templatesFrag = ""
-for t in @templates {
-    @tId = @t['id']
-    @tMuscle = @t['primary_muscle_group']
-    @templatesFrag = "{@templatesFrag}[\"{@tId}\",\"{@tMuscle}\"],"
-}
-
-// --- 5. Build the data-URL page and run the JS core in it ---
+// --- 2. JS core (decoded once, reused for both passes) ---
 @jsB64 = "__HEVY_STATS_JS_B64__"
 @js = base64Decode(@jsB64)
-@page = "<html><head><meta charset=utf-8></head><body><script>{@js}</script></body></html>"
-@page = replaceText("__ROUTINE_NAME__", @routineNameEnc, @page)
-@page = replaceText("__ROUTINE_EXERCISES__", @routineFrag, @page)
-@page = replaceText("__TEMPLATES__", @templatesFrag, @page)
-@page = replaceText("__HISTORY_ENTRIES__", @historyFrag, @page)
-@pageB64 = base64Encode(@page)
-@pageUrl = "data:text/html;charset=utf-8;base64,{@pageB64}"
-@rich = getRichTextFromHTML("{@pageUrl.richtext}")
-@decoded = urlDecode(@rich)
-@result = getDictionary(@decoded)
+@pageShell = "<html><head><meta charset=utf-8></head><body><script>{@js}</script></body></html>"
+
+// --- 3. Pass 1: extract template IDs ---
+@page1 = replaceText("__MODE__", "ids", @pageShell)
+@page1 = replaceText("__ROUTINES_B64__", @routinesB64, @page1)
+@page1B64 = base64Encode(@page1)
+@page1Url = "data:text/html;charset=utf-8;base64,{@page1B64}"
+@rich1 = getRichTextFromHTML("{@page1Url.richtext}")
+@idsJson = urlDecode(@rich1)
+@idsDict = getDictionary(@idsJson)
+@idsErr = "{@idsDict['_error']}"
+if @idsErr != "" {
+    @idsCtx = "{@idsDict['_context']}"
+    show("Hevy Stats: could not read routines. {@idsErr} Details: {@idsCtx}")
+    stop()
+}
+@idsText = "{@idsDict['ids']}"
+
+// --- 4. Fetch history JSON per template (raw text, no parsing) ---
+@historyB64Parts = ""
+if @idsText != "" {
+    @templateIds = splitText(@idsText, ",")
+    for tid in @templateIds {
+        @histJson = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@tid}?page=1&pageSize=100", {"api-key": "{@apiKey}"})
+        @histB64 = base64Encode(@histJson)
+        @historyB64Parts = "{@historyB64Parts}{@histB64}|"
+    }
+}
+
+// --- 5. Fetch templates JSON (raw text, no parsing) ---
+@templatesJson = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{@apiKey}"})
+@templatesB64 = base64Encode(@templatesJson)
+
+// --- 6. Pass 2: compute stats ---
+@page2 = replaceText("__MODE__", "stats", @pageShell)
+@page2 = replaceText("__ROUTINES_B64__", @routinesB64, @page2)
+@page2 = replaceText("__TEMPLATES_B64__", @templatesB64, @page2)
+@page2 = replaceText("__HISTORY_B64__", @historyB64Parts, @page2)
+@page2B64 = base64Encode(@page2)
+@page2Url = "data:text/html;charset=utf-8;base64,{@page2B64}"
+@rich2 = getRichTextFromHTML("{@page2Url.richtext}")
+@resultJson = urlDecode(@rich2)
+@result = getDictionary(@resultJson)
+@resultErr = "{@result['_error']}"
+if @resultErr != "" {
+    @resultCtx = "{@result['_context']}"
+    show("Hevy Stats: could not compute stats. {@resultErr} Details: {@resultCtx}")
+    stop()
+}
+// @result is the shortcut output: {routineName, workingSetsPerMuscleGroup, oneRepMaxKgPerExercise}
