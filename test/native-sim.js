@@ -98,23 +98,8 @@ function runNative(apiKey, api) {
     }
   }
 
-  var templatesJson = "";
-  if (errFlag === 0) {
-    templatesJson = api.templates;
-    if (templatesJson === "") {
-      errFlag = 1;
-      errStage = "fetch-templates";
-      errMsg = "Exercise templates request returned no data";
-      errDetail = "GET /v1/exercise_templates came back empty. Check your network connection.";
-    }
-  }
-  var templates = [];
-  if (errFlag === 0) {
-    var templatesDict = JSON.parse(templatesJson);
-    templates = templatesDict["exercise_templates"] || [];
-    if (!Array.isArray(templates)) templates = [];
-    // tolerated when missing/empty -> "other"
-  }
+  // NOTE: templates are NOT fetched in bulk anymore. Each exercise's
+  // template comes from the single-template endpoint (no pages to miss).
 
   var wsDict = {};
   var muscleOrder = [];
@@ -127,13 +112,17 @@ function runNative(apiKey, api) {
     exercises.forEach(function (ex) {
       var tid = txt(ex.exercise_template_id);
 
+      // Single-template endpoint: one call per exercise, so a template
+      // past page 1 of the catalogue can never be missed. "other" on miss.
       var muscle = "other";
-      templates.forEach(function (t) {
-        if (txt(t.id) === tid) {
-          var pmg = txt(t.primary_muscle_group);
+      if (tid !== "") {
+        var tplJson = (api.template && api.template[tid]) || "";
+        if (tplJson !== "") {
+          var tplDict = JSON.parse(tplJson); // getDictionary; throws like a halt on garbage
+          var pmg = txt(tplDict["primary_muscle_group"]);
           if (pmg !== "") muscle = pmg;
         }
-      });
+      }
 
       // Working sets: counted for EVERY occurrence, even duplicates.
       var sets = ex.sets || [];
@@ -225,10 +214,19 @@ function runNative(apiKey, api) {
 }
 
 // ---------- fixtures ----------
+// Single-template endpoint mock: id -> template object JSON.
+// Built from the old bulk fixture; the "Mystery Machine" (tpl-missing)
+// deliberately has no entry, mirroring a template past page 1.
+function singleTemplates() {
+  var bulk = load("api-templates.json");
+  var map = {};
+  (bulk.exercise_templates || []).forEach(function (t) { map[t.id] = JSON.stringify(t); });
+  return map;
+}
 function happyApi() {
   return {
     routines: JSON.stringify(load("api-routines.json")),
-    templates: JSON.stringify(load("api-templates.json")),
+    template: singleTemplates(),
     history: {
       "tpl-bench": JSON.stringify(load("api-history-bench.json")),
       "tpl-ohp": JSON.stringify(load("api-history-ohp.json")),
@@ -323,8 +321,8 @@ check("error: API-side message is surfaced", function () {
   assert.strictEqual(r.result._context.detail, "The Hevy API itself reported an error: Invalid API key");
   assert.ok(r.notifications[0].indexOf("Invalid API key") >= 0);
 });
-check("error: templates not JSON -> throws (system-level, like halt)", function () {
-  var api = happyApi(); api.templates = "garbage{";
+check("error: single template not JSON -> throws (system-level, like halt)", function () {
+  var api = happyApi(); api.template["tpl-bench"] = "garbage{";
   assert.throws(function () { runNative("KEY", api); }, SyntaxError);
 });
 check("escape: routineName round-trips", function () {
@@ -337,9 +335,9 @@ check("escape: routineName round-trips", function () {
 });
 check("escape: muscle key round-trips", function () {
   var api = happyApi();
-  var tej = load("api-templates.json");
-  tej.exercise_templates[0].primary_muscle_group = 'we"ird\\m';
-  api.templates = JSON.stringify(tej);
+  var t = JSON.parse(api.template["tpl-bench"]);
+  t.primary_muscle_group = 'we"ird\\m';
+  api.template["tpl-bench"] = JSON.stringify(t);
   var r = runNative("KEY", api);
   assert.strictEqual(r.result.workingSetsPerMuscleGroup['we"ird\\m'], 5);
 });
@@ -351,10 +349,21 @@ check("escape: title key round-trips", function () {
   var r = runNative("KEY", api);
   assert.strictEqual(r.result.oneRepMaxKgPerExercise['Be"nch\\Press'], 116.7);
 });
-check("edge: empty templates groups under other", function () {
-  var api = happyApi(); api.templates = JSON.stringify({ exercise_templates: [] });
+check("edge: no template entries -> everything groups under other", function () {
+  var api = happyApi(); api.template = {};
   var r = runNative("KEY", api);
   assert.deepStrictEqual(r.result.workingSetsPerMuscleGroup, { other: 12 });
+});
+check("regression: template past page 1 resolves via single endpoint", function () {
+  // Sep 30: Daniel's Pull Up template id was absent from templates page 1,
+  // so its sets grouped under "other". The single-template endpoint has no
+  // pages to miss: giving the missing template an entry must regroup it.
+  var api = happyApi();
+  api.template["tpl-missing"] = JSON.stringify({ id: "tpl-missing", title: "Mystery Machine", primary_muscle_group: "lats" });
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.errFlag, 0);
+  assert.strictEqual(r.result.workingSetsPerMuscleGroup.lats, 2);
+  assert.ok(!("other" in r.result.workingSetsPerMuscleGroup));
 });
 check("edge: no history -> no 1RMs", function () {
   var api = happyApi(); api.history = {};
