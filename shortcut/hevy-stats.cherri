@@ -30,6 +30,12 @@
 // NOTE: Get Contents of URL halts the shortcut with a system error on HTTP
 // or network failures (e.g. a wrong API key -> 401); Shortcuts offers no
 // try/catch for that. Everything else is handled below.
+//
+// CHERRI GOTCHA (Sep 30, 2026 — cost a full device-test round trip):
+// the `@dict['key']` subscript syntax SILENTLY compiles to a plain variable
+// copy, dropping the key lookup entirely. ALWAYS use getValue(@dict, "key")
+// (which correctly emits Get Dictionary Value), extracting to a temp var
+// before text interpolation.
 
 #include 'actions/web'
 #include 'actions/text'
@@ -72,14 +78,14 @@ if @errFlag == 0 {
 // --- Parse routines ---
 if @errFlag == 0 {
     @routinesDict = getDictionary(@routinesJson)
-    @routinesList = @routinesDict['routines']
+    @routinesList = getValue(@routinesDict, "routines")
     @nRoutines = count(@routinesList)
     if @nRoutines == 0 {
         @errFlag = 1
         @errStage = "parse-routines"
         @errMsg = "No usable routines in response"
         @errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active."
-        @apiMsg = @routinesDict['message']
+        @apiMsg = getValue(@routinesDict, "message")
         @apiMsgTxt = "{@apiMsg}"
         if @apiMsgTxt != @empty {
             @errDetail = "The Hevy API itself reported an error: {@apiMsgTxt}"
@@ -88,7 +94,9 @@ if @errFlag == 0 {
 }
 if @errFlag == 0 {
     @routine = getFirstItem(@routinesList)
-    @routineName = "{@routine['title']}"
+    @routineDict = getDictionary(@routine)
+    @routineTitle = getValue(@routineDict, "title")
+    @routineName = "{@routineTitle}"
     if @routineName == @empty {
         @errFlag = 1
         @errStage = "parse-routines"
@@ -110,14 +118,14 @@ if @errFlag == 0 {
 }
 if @errFlag == 0 {
     @templatesDict = getDictionary(@templatesJson)
-    @templates = @templatesDict['exercise_templates']
+    @templates = getValue(@templatesDict, "exercise_templates")
     // A missing/empty templates list is tolerated: every exercise is then
     // grouped under "other" instead of failing the whole run.
 }
 
 // --- Per-exercise: working sets + best Epley 1RM ---
 if @errFlag == 0 {
-    @exercises = @routine['exercises']
+    @exercises = getValue(@routineDict, "exercises")
     @wsDict = {}
     @muscleOrder = ""
     @wsSep = ""
@@ -128,14 +136,19 @@ if @errFlag == 0 {
     @seenTids = "|"
 
     for ex in @exercises {
-        @tid = "{@ex['exercise_template_id']}"
+        @exDict = getDictionary(@ex)
+        @tidVal = getValue(@exDict, "exercise_template_id")
+        @tid = "{@tidVal}"
 
         // Primary muscle group for this template ("other" on miss).
         @muscle = "other"
         for t in @templates {
-            @tid2 = "{@t['id']}"
+            @tDict = getDictionary(@t)
+            @tid2Val = getValue(@tDict, "id")
+            @tid2 = "{@tid2Val}"
             if @tid2 == @tid {
-                @pmg = "{@t['primary_muscle_group']}"
+                @pmgVal = getValue(@tDict, "primary_muscle_group")
+                @pmg = "{@pmgVal}"
                 if @pmg != @empty {
                     @muscle = @pmg
                 }
@@ -144,10 +157,12 @@ if @errFlag == 0 {
 
         // Working sets prescribed in the routine (warmup excluded).
         // Counted for EVERY occurrence, even duplicate exercises.
-        @sets = @ex['sets']
+        @sets = getValue(@exDict, "sets")
         @wsCount = 0
         for s in @sets {
-            @stype = "{@s['type']}"
+            @sDict = getDictionary(@s)
+            @stypeVal = getValue(@sDict, "type")
+            @stype = "{@stypeVal}"
             if @okTypes contains ",{@stype}," {
                 @wsCount = @wsCount + 1
             }
@@ -181,11 +196,15 @@ if @errFlag == 0 {
                 @historyTxt = "{@historyJson}"
                 if @historyTxt != @empty {
                     @historyDict = getDictionary(@historyJson)
-                    @entries = @historyDict['exercise_history']
+                    @entries = getValue(@historyDict, "exercise_history")
                     for e in @entries {
-                        @wTxt = "{@e['weight_kg']}"
-                        @rTxt = "{@e['reps']}"
-                        @hType = "{@e['set_type']}"
+                        @eDict = getDictionary(@e)
+                        @wVal = getValue(@eDict, "weight_kg")
+                        @wTxt = "{@wVal}"
+                        @rVal = getValue(@eDict, "reps")
+                        @rTxt = "{@rVal}"
+                        @hTypeVal = getValue(@eDict, "set_type")
+                        @hType = "{@hTypeVal}"
                         if @okTypes contains ",{@hType}," {
                             @wNum = number(@wTxt)
                             @rNum = number(@rTxt)
@@ -210,7 +229,8 @@ if @errFlag == 0 {
                 }
                 if @best > 0 {
                     @bestR = round(@best, "Tenths")
-                    @title = "{@ex['title']}"
+                    @titleVal = getValue(@exDict, "title")
+                    @title = "{@titleVal}"
                     if @title == @empty {
                         @title = @tid
                     }
