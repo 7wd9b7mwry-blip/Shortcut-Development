@@ -71,3 +71,18 @@ The key is passed as **Shortcut Input** at runtime (per the user's request). It 
 
 - **Live Hevy API** — request shapes follow the official OpenAPI spec, but no call was made with a real API key.
 - **Device end-to-end** — logic is covered by the Node sim and the compiled plist was inspected action-by-action, but the shortcut has not yet been run on a real iPhone with a real key.
+
+## 2026-09-30 — bare truthiness checks removed (device failure)
+Daniel ran the native build and got `Hevy Stats error: ()` — the error
+notification fired with an EMPTY message. Compiled-plist inspection showed
+the terminal `if !@errMsg {A} else {B}` was logically correct (Cherri
+normalizes it to `if @errMsg {B} else {A}` with cond 100/101), so an empty
+message reaching the notification is only possible if bare truthiness
+conditions (`if @x` / `if !@x`, WFCondition 100/101) misbehave at runtime —
+either inverted, or empty strings counting as "has any value".
+Fix: the template now uses NO bare truthiness checks anywhere. Error state
+is a numeric `@errFlag` (0/1) tested with `==`; emptiness is tested with
+explicit `== @empty` / `!= @empty` text comparisons (cond 4/5), and
+`downloadURL`/`getValue` outputs are coerced to text via `"{@var}"`
+interpolation because Cherri's type checker rejects `==` on unknown-typed
+variables. Compiled build verified: zero 100/101 conditions remain.
