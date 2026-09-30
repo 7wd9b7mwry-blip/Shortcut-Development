@@ -86,3 +86,45 @@ explicit `== @empty` / `!= @empty` text comparisons (cond 4/5), and
 `downloadURL`/`getValue` outputs are coerced to text via `"{@var}"`
 interpolation because Cherri's type checker rejects `==` on unknown-typed
 variables. Compiled build verified: zero 100/101 conditions remain.
+
+## 2026-09-30 — `@dict['key']` subscript silently dropped (device failure)
+
+Daniel ran the fixed build with a real key and got
+`Hevy Stats error: No usable routines in response` even though the API
+returned his "Sample" routine. Daniel shared his key for testing (kept out
+of the repo); a direct API call returned HTTP 200 with a valid
+`{"page","page_count","routines":[...]}` payload, proving the bug was in the
+compiled shortcut, not the API.
+
+Root cause: Cherri 2.3.0 **silently compiles `@dict['key']` to a plain
+variable copy**, dropping the key lookup — no `getvalueforkey` action is
+emitted. Verified with a minimal repro: `@b = @a['routines']` produced only
+`setvariable b`, while `@c = getValue(@a, "templates")` correctly produced
+`getvalueforkey`. So `@routinesList` was the whole response dict, and
+`count()` on it did not yield the list length, tripping the empty-routines
+error branch.
+
+Fix: every `@x['key']` replaced with `getValue(@x, "key")`. Complication:
+Cherri's type checker only accepts `getValue` on statically-typed
+`dictionary` values ("For constants only, otherwise `dictionary['key']`
+syntax should be used"), and loop variables / `getFirstItem()` results are
+typed `variable`. Workaround: cast with `@xDict = getDictionary(@x)` first
+(`getDictionary` takes `variable` and returns `dictionary`; the underlying
+"Get Dictionary from Input" coercion is identity for dict input), then
+`getValue(@xDict, "key")`. The cast pattern was verified in isolation before
+applying.
+
+Post-fix audit of the compiled plist: 387 actions, 17 `getValue` calls in
+source = 17 `getvalueforkey` actions in plist (all expected keys present:
+routines, message, title, exercise_templates, exercises,
+exercise_template_id, id, primary_muscle_group, sets, type,
+exercise_history, weight_kg, reps, set_type + 2 dynamic keys), 1 setValue =
+1 setvalueforkey, zero bare-truthiness conditions.
+
+End-to-end verification with Daniel's real API responses (routines,
+templates, both exercise histories; fixtures kept local, never committed):
+`{"routineName":"Sample","workingSetsPerMuscleGroup":{"chest":3,"other":3},
+"oneRepMaxKgPerExercise":{"Bench Press (Barbell)":69.9}}` — correct.
+(Pull Up's template id was absent from templates page 1, so it groups under
+"other" per the documented design; its history weights are null so it has no
+1RM.)
