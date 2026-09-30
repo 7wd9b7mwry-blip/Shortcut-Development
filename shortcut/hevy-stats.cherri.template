@@ -43,6 +43,10 @@
 @page1Url = "data:text/html;charset=utf-8;base64,{@page1B64}"
 @rich1 = getRichTextFromHTML("{@page1Url.richtext}")
 @idsJson = urlDecode(@rich1)
+if @idsJson == "" {
+    show("Hevy Stats: pass 1 (template IDs) returned no output. The JavaScript core did not run — check that the data URL page executed.")
+    stop()
+}
 @idsDict = getDictionary(@idsJson)
 @idsErr = "{@idsDict['_error']}"
 if @idsErr != "" {
@@ -76,6 +80,10 @@ if @idsText != "" {
 @page2Url = "data:text/html;charset=utf-8;base64,{@page2B64}"
 @rich2 = getRichTextFromHTML("{@page2Url.richtext}")
 @resultJson = urlDecode(@rich2)
+if @resultJson == "" {
+    show("Hevy Stats: pass 2 (compute stats) returned no output. The JavaScript core did not run — check that the data URL page executed.")
+    stop()
+}
 @result = getDictionary(@resultJson)
 @resultErr = "{@result['_error']}"
 if @resultErr != "" {
@@ -83,4 +91,5 @@ if @resultErr != "" {
     show("Hevy Stats: could not compute stats. {@resultErr} Details: {@resultCtx}")
     stop()
 }
-// @result is the shortcut output: {routineName, workingSetsPerMuscleGroup, oneRepMaxKgPerExercise}
+// Explicit output: the result dictionary.
+@finalResult = @result
