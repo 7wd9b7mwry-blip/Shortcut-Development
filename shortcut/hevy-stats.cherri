@@ -106,25 +106,10 @@ if @errFlag == 0 {
     }
 }
 
-// --- Fetch exercise templates (primary muscle groups) ---
-if @errFlag == 0 {
-    @templatesJson = downloadURL("https://api.hevyapp.com/v1/exercise_templates?page=1&pageSize=100", {"api-key": "{@apiKey}"})
-    @templatesTxt = "{@templatesJson}"
-    if @templatesTxt == @empty {
-        @errFlag = 1
-        @errStage = "fetch-templates"
-        @errMsg = "Exercise templates request returned no data"
-        @errDetail = "GET /v1/exercise_templates came back empty. Check your network connection."
-    }
-}
-if @errFlag == 0 {
-    @templatesDict = getDictionary(@templatesJson)
-    @templates = getValue(@templatesDict, "exercise_templates")
-    // A missing/empty templates list is tolerated: every exercise is then
-    // grouped under "other" instead of failing the whole run.
-}
-
 // --- Per-exercise: working sets + best Epley 1RM ---
+// Muscle groups come from the single-template endpoint
+// (GET /v1/exercise_templates/{id}), one tiny call per exercise, so a
+// template is never missed because it fell past page 1 of the catalogue.
 if @errFlag == 0 {
     @exercises = getValue(@routineDict, "exercises")
     @wsDict = {}
@@ -141,14 +126,16 @@ if @errFlag == 0 {
         @tidVal = getValue(@exDict, "exercise_template_id")
         @tid = "{@tidVal}"
 
-        // Primary muscle group for this template ("other" on miss).
+        // Primary muscle group via the single-template endpoint.
+        // One tiny call per exercise — never misses a template that sits
+        // past page 1 of the catalogue. "other" when the fetch misses.
         @muscle = "other"
-        for t in @templates {
-            @tDict = getDictionary(@t)
-            @tid2Val = getValue(@tDict, "id")
-            @tid2 = "{@tid2Val}"
-            if @tid2 == @tid {
-                @pmgVal = getValue(@tDict, "primary_muscle_group")
+        if @tid != @empty {
+            @tplJson = downloadURL("https://api.hevyapp.com/v1/exercise_templates/{@tid}", {"api-key": "{@apiKey}"})
+            @tplTxt = "{@tplJson}"
+            if @tplTxt != @empty {
+                @tplDict = getDictionary(@tplJson)
+                @pmgVal = getValue(@tplDict, "primary_muscle_group")
                 @pmg = "{@pmgVal}"
                 if @pmg != @empty {
                     @muscle = @pmg
