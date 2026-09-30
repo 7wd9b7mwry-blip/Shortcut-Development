@@ -79,6 +79,11 @@ if @errFlag == 0 {
         @errStage = "parse-routines"
         @errMsg = "No usable routines in response"
         @errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active."
+        @apiMsg = @routinesDict['message']
+        @apiMsgTxt = "{@apiMsg}"
+        if @apiMsgTxt != @empty {
+            @errDetail = "The Hevy API itself reported an error: {@apiMsgTxt}"
+        }
     }
 }
 if @errFlag == 0 {
