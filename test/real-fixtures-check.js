@@ -18,9 +18,23 @@ src = src.slice(0, src.indexOf("// ---------- fixtures ----------"));
 var factory = new Function("require", "__dirname", "fs", "path", "assert", src + "\nreturn runNative;");
 var runNative = factory(require, __dirname, fs, path, assert);
 
+var bulkTemplates = JSON.parse(load("templates.json")).exercise_templates;
+var single = {};
+bulkTemplates.forEach(function (t) { single[t.id] = JSON.stringify(t); });
+// Daniel's Pull Up template (1B2B1E7C) sits past page 1 of the catalogue,
+// so it is absent from templates.json. Mock its single-template response;
+// "lats" is the assumed primary group — the on-device run reports the real
+// value, and this mock is updated to match if different.
+single["1B2B1E7C"] = JSON.stringify({
+  id: "1B2B1E7C",
+  title: "Pull Up",
+  type: "weight_reps",
+  primary_muscle_group: "lats",
+});
+
 var api = {
   routines: load("routines.json"),
-  templates: load("templates.json"),
+  template: single,
   history: {
     "79D0BB3A": load("hist_79D0BB3A.json"),
     "1B2B1E7C": load("hist_1B2B1E7C.json"),
@@ -31,7 +45,8 @@ var r = runNative("KEY", api);
 assert.strictEqual(r.notifications.length, 0, "no error notifications expected");
 assert.deepStrictEqual(r.result, {
   routineName: "Sample",
-  workingSetsPerMuscleGroup: { chest: 3, other: 3 },
+  workingSetsPerMuscleGroup: { chest: 3, lats: 3 },
   oneRepMaxKgPerExercise: { "Bench Press (Barbell)": 69.9 },
+  // Pull Up is bodyweight-only in history (weight_kg null) -> no 1RM, by design.
 });
 console.log("real-fixtures check passed:", JSON.stringify(r.result));
