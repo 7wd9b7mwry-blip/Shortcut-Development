@@ -1,11 +1,15 @@
 #define name Hevy Stats
 // Hevy Stats — native Shortcuts actions (no JavaScript, no HTML).
 //
-// Input:  Hevy API key passed as Shortcut Input (never prompted).
-// Output: ALWAYS a dictionary — either the stats result:
+// Input:  Shortcut Input is either your Hevy API key as plain text, or a
+//         JSON dictionary / Dictionary {"api_key": "...", "body_weight_kg": 70}.
+//         body_weight_kg is optional; when absent the latest Hevy body
+//         measurement is used, else bodyweight sets get no weight metrics.
+// Output: ALWAYS a dictionary:
 //           {"routineName": ..., "workingSetsPerMuscleGroup": {...},
-//            "oneRepMaxKgPerExercise": {...}}
-//         or a detailed error:
+//            "volumeKgPerExercise": {...}, "volumeKgPerMuscleGroup": {...},
+//            "oneRepMaxKgPerExercise": {...}, "bodyWeightKgUsed": 70 | null}
+// Error branches return a detailed error:
 //           {"_error": ..., "_context": {"stage": ..., "detail": ...}}
 // Error branches also show a notification with the specific message and
 // relevant state. There are no silent failures.
@@ -14,9 +18,18 @@
 //   - working sets: routine sets whose type is normal/failure/dropset
 //     (warmup excluded), grouped by the exercise's primary muscle group
 //     ("other" when the template lookup misses).
+//   - effective weight per history set: logged weight_kg when > 0, else the
+//     body weight for bodyweight sets (weight_kg null/0) when known.
 //   - 1RM: best Epley estimate (weight*(1+reps/30), true singles use the
-//     weight itself) over history sets with weight > 0 and 1 <= reps <= 30,
-//     rounded to 0.1 kg. Exercises without a qualifying set are omitted.
+//     weight itself) over qualifying history sets, rounded to 0.1 kg.
+//     Exercises without a qualifying set are omitted.
+//   - volume: sum of effective-weight x reps over the same qualifying sets
+//     from the fetched history, per exercise and per muscle group,
+//     rounded to 0.1 kg. Exercises with no volume are omitted.
+//   - qualifying set: type normal/failure/dropset (warmup excluded),
+//     effective weight > 0, reps 1..30.
+//   - body weight precedence: explicit body_weight_kg input > latest Hevy
+//     body measurement with a weight > 0 > unknown.
 //   - the first routine returned by the API is treated as most recently
 //     updated.
 //
@@ -43,7 +56,50 @@
 #include 'actions/math'
 #define name HevyStats
 
-@apiKey = "{ShortcutInput}"
+@inputTxt = "{ShortcutInput}"
+@apiKey = ""
+@bodyWeightTxt = ""
+// Input shapes: plain API key text (backwards compatible), JSON dictionary
+// text {"api_key": "...", "body_weight_kg": 70}, or a real Dictionary object
+// (which coerces to plist-style text: api_key = "UUID";). The quoted-key
+// check keeps getDictionary away from plain key text.
+if @inputTxt contains "\"api_key\"" {
+    @inputDict = getDictionary(@inputTxt)
+    @keyVal = getValue(@inputDict, "api_key")
+    @apiKey = "{@keyVal}"
+    @bwVal = getValue(@inputDict, "body_weight_kg")
+    @bodyWeightTxt = "{@bwVal}"
+} else {
+    if @inputTxt contains "api_key" {
+        // Plist-style dictionary text: api_key = "UUID"; body_weight_kg = 70;
+        @kpParts = splitText(@inputTxt, "api_key = \"")
+        @kpTail = getLastItem(@kpParts)
+        @kpTailTxt = "{@kpTail}"
+        @kvParts = splitText(@kpTailTxt, "\"")
+        @apiKey = getFirstItem(@kvParts)
+        if @inputTxt contains "body_weight_kg" {
+            @wpParts = splitText(@inputTxt, "body_weight_kg = ")
+            @wpTail = getLastItem(@wpParts)
+            @wpTailTxt = "{@wpTail}"
+            @wpNoQuotes = replaceText("\"", "", @wpTailTxt)
+            @wvParts = splitText(@wpNoQuotes, ";")
+            @bodyWeightTxt = getFirstItem(@wvParts)
+        }
+    } else {
+        if @inputTxt contains "{" {
+            // Dict-shaped but no api_key: leave @apiKey empty so the
+            // missing-key error below fires (a no-op assignment keeps
+            // the branch non-empty for the compiler).
+            @apiKey = ""
+        } else {
+            @apiKey = @inputTxt
+        }
+    }
+}
+// getFirstItem/getLastItem return untyped variables; coerce to text for the
+// type checker (same pattern as downloadURL/getValue outputs elsewhere).
+@apiKey = "{@apiKey}"
+@bodyWeightTxt = "{@bodyWeightTxt}"
 // Numeric error flag (0 = ok, 1 = error). Never tested with truthiness.
 @errFlag = 0
 @errMsg = ""
@@ -56,12 +112,11 @@
 @cb = '}'
 // Working-set types, comma-padded so `contains` matches whole types only.
 @okTypes = ",normal,failure,dropset,"
-
 if @apiKey == @empty {
     @errFlag = 1
     @errStage = "read-input"
     @errMsg = "Missing API key"
-    @errDetail = "Shortcut Input was empty. Pass your Hevy API key as the shortcut input."
+    @errDetail = 'Shortcut Input was empty, or the input dictionary had no api_key. Pass your Hevy API key as the shortcut input, or a JSON dictionary {"api_key": "...", "body_weight_kg": 70}.'
 }
 
 // --- Fetch routines ---
@@ -106,6 +161,41 @@ if @errFlag == 0 {
     }
 }
 
+// --- Body weight (for bodyweight history sets) ---
+// Precedence: explicit body_weight_kg input > latest Hevy body measurement
+// with weight > 0 > unknown (0). Measurements are newest-first; the first
+// entry carrying a positive weight wins. A miss is tolerated, never an
+// error: bodyweight sets then simply get no weight-based metrics.
+@bodyWeightNum = 0
+if @errFlag == 0 {
+    if @bodyWeightTxt != @empty {
+        @bodyWeightNum = number(@bodyWeightTxt)
+    }
+}
+if @errFlag == 0 {
+    if @bodyWeightNum == 0 {
+        @bmJson = downloadURL("https://api.hevyapp.com/v1/body_measurements?page=1&pageSize=10", {"api-key": "{@apiKey}"})
+        @bmTxt = "{@bmJson}"
+        if @bmTxt != @empty {
+            @bmDict = getDictionary(@bmJson)
+            @bms = getValue(@bmDict, "body_measurements")
+            for bm in @bms {
+                if @bodyWeightNum == 0 {
+                    @bmEntry = getDictionary(@bm)
+                    @bmwVal = getValue(@bmEntry, "weight_kg")
+                    @bmwTxt = "{@bmwVal}"
+                    if @bmwTxt != @empty {
+                        @bmwNum = number(@bmwTxt)
+                        if @bmwNum > 0 {
+                            @bodyWeightNum = @bmwNum
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // --- Per-exercise: working sets + best Epley 1RM ---
 // Muscle groups come from the single-template endpoint
 // (GET /v1/exercise_templates/{id}), one tiny call per exercise, so a
@@ -119,6 +209,13 @@ if @errFlag == 0 {
     @wsESep = ""
     @rmJson = ""
     @rmSep = ""
+    @volExJson = ""
+    @volExSep = ""
+    @volDict = {}
+    @volMuscleOrder = ""
+    @volMSep = ""
+    @volMuscleJson = ""
+    @volMuscleSep = ""
     @seenTids = "|"
 
     for ex in @exercises {
@@ -180,6 +277,7 @@ if @errFlag == 0 {
         if @dup == 0 {
             if @tid != @empty {
                 @best = 0
+                @vol = 0
                 @historyJson = downloadURL("https://api.hevyapp.com/v1/exercise_history/{@tid}?page=1&pageSize=100", {"api-key": "{@apiKey}"})
                 @historyTxt = "{@historyJson}"
                 if @historyTxt != @empty {
@@ -206,36 +304,66 @@ if @errFlag == 0 {
                             if @rTxt != @empty {
                                 @rNum = number(@rTxt)
                             }
+                            // Effective weight: logged weight when > 0, else
+                            // the body weight for bodyweight sets (null/0
+                            // weight_kg) when known, else 0 (skipped).
+                            @effW = 0
                             if @wNum > 0 {
+                                @effW = @wNum
+                            } else {
+                                if @bodyWeightNum > 0 {
+                                    @effW = @bodyWeightNum
+                                }
+                            }
+                            if @effW > 0 {
                                 if @rNum >= 1 {
                                     if @rNum <= 30 {
                                         if @rNum == 1 {
                                             // "* 1" keeps the number type: a bare
                                             // "@est = @wNum" copy loses it in Cherri.
-                                            @est = @wNum * 1
+                                            @est = @effW * 1
                                         } else {
-                                            @est = @wNum * (1 + @rNum / 30)
+                                            @est = @effW * (1 + @rNum / 30)
                                         }
                                         if @est > @best {
                                             @best = @est
                                         }
+                                        @vol = @vol + @effW * @rNum
                                     }
                                 }
                             }
                         }
                     }
                 }
+                @titleVal = getValue(@exDict, "title")
+                @title = "{@titleVal}"
+                if @title == @empty {
+                    @title = @tid
+                }
+                @safeTitle = replaceText("\\", "\\\\", @title)
+                @safeTitle = replaceText("\"", "\\\"", @safeTitle)
                 if @best > 0 {
                     @bestR = round(@best, "Tenths")
-                    @titleVal = getValue(@exDict, "title")
-                    @title = "{@titleVal}"
-                    if @title == @empty {
-                        @title = @tid
-                    }
-                    @safeTitle = replaceText("\\", "\\\\", @title)
-                    @safeTitle = replaceText("\"", "\\\"", @safeTitle)
                     @rmJson = "{@rmJson}{@rmSep}\"{@safeTitle}\": {@bestR}"
                     @rmSep = ", "
+                }
+                if @vol > 0 {
+                    @volR = round(@vol, "Tenths")
+                    @volExJson = "{@volExJson}{@volExSep}\"{@safeTitle}\": {@volR}"
+                    @volExSep = ", "
+                    // Per-muscle-group volume, in first-seen muscle order.
+                    @curVolVal = getValue(@volDict, @muscle)
+                    @curVolTxt = "{@curVolVal}"
+                    if @curVolTxt == @empty {
+                        @curVolNum = 0
+                        @volMuscleOrder = "{@volMuscleOrder}{@volMSep}{@muscle}"
+                        @volMSep = ","
+                    } else {
+                        @curVolNum = number(@curVolTxt)
+                    }
+                    @newVolSum = @curVolNum + @volR
+                    @newVol = round(@newVolSum, "Tenths")
+                    @volDict = setValue(@volDict, @muscle, "{@newVol}")
                 }
             }
         }
@@ -255,9 +383,25 @@ if @errFlag == 0 {
         }
     }
 
+    // Volume-per-muscle entries, in first-seen muscle order.
+    @volMuscleList = splitText(@volMuscleOrder, ",")
+    for vm in @volMuscleList {
+        if @vm != @empty {
+            @vmVol = getValue(@volDict, @vm)
+            @safeVM = replaceText("\\", "\\\\", @vm)
+            @safeVM = replaceText("\"", "\\\"", @safeVM)
+            @volMuscleJson = "{@volMuscleJson}{@volMuscleSep}\"{@safeVM}\": {@vmVol}"
+            @volMuscleSep = ", "
+        }
+    }
+
     @safeRoutineName = replaceText("\\", "\\\\", @routineName)
     @safeRoutineName = replaceText("\"", "\\\"", @safeRoutineName)
-    @resultJson = "{@ob}\"routineName\": \"{@safeRoutineName}\", \"workingSetsPerMuscleGroup\": {@ob}{@wsEntries}{@cb}, \"oneRepMaxKgPerExercise\": {@ob}{@rmJson}{@cb}{@cb}"
+    @bwJsonVal = "null"
+    if @bodyWeightNum > 0 {
+        @bwJsonVal = "{@bodyWeightNum}"
+    }
+    @resultJson = "{@ob}\"routineName\": \"{@safeRoutineName}\", \"workingSetsPerMuscleGroup\": {@ob}{@wsEntries}{@cb}, \"volumeKgPerExercise\": {@ob}{@volExJson}{@cb}, \"volumeKgPerMuscleGroup\": {@ob}{@volMuscleJson}{@cb}, \"oneRepMaxKgPerExercise\": {@ob}{@rmJson}{@cb}, \"bodyWeightKgUsed\": {@bwJsonVal}{@cb}"
 }
 
 // --- Error payload (built always; used only on the error branch) ---

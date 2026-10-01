@@ -218,12 +218,31 @@ function qualifiesFor1RM(weightKg, reps, setType) {
   return true;
 }
 
+/*
+ * Effective weight for a history set: the logged weight when > 0, else the
+ * body weight for bodyweight sets (null/0 weight_kg) when known, else 0
+ * (the set contributes no weight-based metrics).
+ */
+function effectiveWeightKg(weightKg, bodyWeightKg) {
+  var w = parseFloat(weightKg);
+  if (w > 0) {
+    return w;
+  }
+  var b = parseFloat(bodyWeightKg);
+  if (b > 0) {
+    return b;
+  }
+  return 0;
+}
+
 function computeStats(parsed) {
   var muscleByTemplate = parsed.muscleByTemplate;
   var routine = parsed.routine;
+  var bodyWeightKg = parsed.bodyWeightKg; // optional
 
   var workingSets = {};
   var titleByTemplate = {};
+  var muscleByTid = {};
   var i, s;
   for (i = 0; i < routine.exercises.length; i++) {
     var ex = routine.exercises[i];
@@ -231,6 +250,9 @@ function computeStats(parsed) {
       titleByTemplate[ex.templateId] = ex.title;
     }
     var muscle = muscleByTemplate[ex.templateId] || "other";
+    if (!(ex.templateId in muscleByTid)) {
+      muscleByTid[ex.templateId] = muscle;
+    }
     for (s = 0; s < ex.setTypes.length; s++) {
       if (WORKING_SET_TYPES[ex.setTypes[s]]) {
         workingSets[muscle] = (workingSets[muscle] || 0) + 1;
@@ -239,19 +261,27 @@ function computeStats(parsed) {
   }
 
   var bestEpley = {}; // templateId -> number
+  var volumeByTid = {}; // templateId -> number (effective weight x reps)
   for (i = 0; i < parsed.historyEntries.length; i++) {
     var h = parsed.historyEntries[i];
-    // Weight/reps may be strings or null; parseFloat/parseInt turn nulls
-    // into NaN, which fails the checks in qualifiesFor1RM and is excluded.
-    var w = parseFloat(h.weightKg);
+    // Weight/reps may be strings or null; parseInt(null) is NaN and fails
+    // the range check below.
     var r = parseInt(h.reps, 10);
-    if (!qualifiesFor1RM(w, r, h.setType)) {
+    if (!WORKING_SET_TYPES[h.setType]) {
       continue;
     }
-    var est = epley1RM(w, r);
+    if (!(r >= 1 && r <= MAX_REPS_FOR_EPLEY)) {
+      continue;
+    }
+    var effW = effectiveWeightKg(h.weightKg, bodyWeightKg);
+    if (!(effW > 0)) {
+      continue;
+    }
+    var est = epley1RM(effW, r);
     if (!(h.templateId in bestEpley) || est > bestEpley[h.templateId]) {
       bestEpley[h.templateId] = est;
     }
+    volumeByTid[h.templateId] = (volumeByTid[h.templateId] || 0) + effW * r;
   }
 
   var oneRepMax = {};
@@ -263,10 +293,30 @@ function computeStats(parsed) {
     oneRepMax[label] = Math.round(bestEpley[tid] * 10) / 10;
   }
 
+  var volumePerExercise = {};
+  var volumePerMuscle = {};
+  for (var vtid in volumeByTid) {
+    if (!Object.prototype.hasOwnProperty.call(volumeByTid, vtid)) {
+      continue;
+    }
+    var vlabel = titleByTemplate[vtid] || vtid;
+    var v = Math.round(volumeByTid[vtid] * 10) / 10;
+    if (!(v > 0)) {
+      continue;
+    }
+    volumePerExercise[vlabel] = v;
+    var vm = muscleByTid[vtid] || "other";
+    volumePerMuscle[vm] = Math.round(((volumePerMuscle[vm] || 0) + v) * 10) / 10;
+  }
+
+  var bwNum = parseFloat(bodyWeightKg);
   return {
     routineName: routine.routineName,
     workingSetsPerMuscleGroup: workingSets,
-    oneRepMaxKgPerExercise: oneRepMax
+    volumeKgPerExercise: volumePerExercise,
+    volumeKgPerMuscleGroup: volumePerMuscle,
+    oneRepMaxKgPerExercise: oneRepMax,
+    bodyWeightKgUsed: bwNum > 0 ? bwNum : null
   };
 }
 
@@ -369,6 +419,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseHistoryResponse: parseHistoryResponse,
     epley1RM: epley1RM,
     qualifiesFor1RM: qualifiesFor1RM,
+    effectiveWeightKg: effectiveWeightKg,
     HevyError: HevyError,
     WORKING_SET_TYPES: WORKING_SET_TYPES
   };

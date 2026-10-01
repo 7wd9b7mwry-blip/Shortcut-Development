@@ -35,6 +35,7 @@ single["1B2B1E7C"] = JSON.stringify({
 var api = {
   routines: load("routines.json"),
   template: single,
+  bodyMeasurements: JSON.stringify({ body_measurements: [] }),
   history: {
     "79D0BB3A": load("hist_79D0BB3A.json"),
     "1B2B1E7C": load("hist_1B2B1E7C.json"),
@@ -46,7 +47,24 @@ assert.strictEqual(r.notifications.length, 0, "no error notifications expected")
 assert.deepStrictEqual(r.result, {
   routineName: "Sample",
   workingSetsPerMuscleGroup: { chest: 3, lats: 3 },
+  volumeKgPerExercise: { "Bench Press (Barbell)": 1646.5 },
+  volumeKgPerMuscleGroup: { chest: 1646.5 },
   oneRepMaxKgPerExercise: { "Bench Press (Barbell)": 69.9 },
-  // Pull Up is bodyweight-only in history (weight_kg null) -> no 1RM, by design.
+  bodyWeightKgUsed: null,
+  // Pull Up is bodyweight-only in history (weight_kg null) and no body
+  // weight is known -> no 1RM and no volume, by design.
 });
 console.log("real-fixtures check passed:", JSON.stringify(r.result));
+
+// And with an explicit body weight, Pull Up gains both metrics:
+// 1RM 70*(1+12/30) = 98, volume 70*(12+11+10) = 2310.
+var r2 = runNative('{"api_key": "KEY", "body_weight_kg": 70}', api);
+assert.strictEqual(r2.errFlag, 0);
+assert.strictEqual(r2.result.oneRepMaxKgPerExercise["Pull Up"], 98);
+assert.strictEqual(r2.result.volumeKgPerExercise["Pull Up"], 2310);
+assert.strictEqual(r2.result.volumeKgPerMuscleGroup.lats, 2310);
+assert.strictEqual(r2.result.bodyWeightKgUsed, 70);
+console.log("real-fixtures body-weight check passed:", JSON.stringify({
+  pullUp1RM: r2.result.oneRepMaxKgPerExercise["Pull Up"],
+  pullUpVolume: r2.result.volumeKgPerExercise["Pull Up"],
+}));

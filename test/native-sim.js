@@ -45,17 +45,47 @@ function esc(s) {
 var OK_TYPES = ",normal,failure,dropset,";
 
 // Mirrors the Cherri template exactly: errFlag numeric, explicit "" checks.
-function runNative(apiKey, api) {
+// input: plain API key text, JSON dictionary text, or plist-style dictionary
+// text (what "{ShortcutInput}" yields for a real Dictionary object).
+function parseInput(input) {
+  var inputTxt = String(input);
+  var apiKey = "";
+  var bwTxt = "";
+  if (inputTxt.indexOf('"api_key"') >= 0) {
+    var d = JSON.parse(inputTxt); // getDictionary
+    apiKey = txt(d["api_key"]);
+    bwTxt = txt(d["body_weight_kg"]);
+  } else if (inputTxt.indexOf("api_key") >= 0) {
+    // Plist-style: api_key = "UUID"; body_weight_kg = 70;
+    var kp = inputTxt.split('api_key = "');
+    apiKey = kp[kp.length - 1].split('"')[0];
+    if (inputTxt.indexOf("body_weight_kg") >= 0) {
+      var wp = inputTxt.split("body_weight_kg = ");
+      bwTxt = wp[wp.length - 1].split(";")[0].replace(/"/g, "").trim();
+    }
+  } else if (inputTxt.indexOf("{") >= 0) {
+    // Dict-shaped but no api_key: leave apiKey empty -> read-input error.
+  } else {
+    apiKey = inputTxt;
+  }
+  return { apiKey: apiKey, bwTxt: bwTxt };
+}
+
+function runNative(input, api) {
   var errFlag = 0;
   var errMsg = "";
   var errDetail = "";
   var errStage = "";
 
+  var parsed = parseInput(input);
+  var apiKey = parsed.apiKey;
+  var bodyWeightTxt = parsed.bwTxt;
+
   if (apiKey === "") {
     errFlag = 1;
     errStage = "read-input";
     errMsg = "Missing API key";
-    errDetail = "Shortcut Input was empty. Pass your Hevy API key as the shortcut input.";
+    errDetail = "Shortcut Input was empty, or the input dictionary had no api_key. Pass your Hevy API key as the shortcut input, or a JSON dictionary {\"api_key\": \"...\", \"body_weight_kg\": 70}.";
   }
 
   var routinesJson = "";
@@ -101,9 +131,29 @@ function runNative(apiKey, api) {
   // NOTE: templates are NOT fetched in bulk anymore. Each exercise's
   // template comes from the single-template endpoint (no pages to miss).
 
+  // Body weight: explicit input > latest Hevy body measurement > unknown.
+  var bodyWeightNum = 0;
+  if (errFlag === 0 && bodyWeightTxt !== "") {
+    bodyWeightNum = toNumber(bodyWeightTxt);
+  }
+  if (errFlag === 0 && bodyWeightNum === 0 && api.bodyMeasurements) {
+    var bmDict = JSON.parse(api.bodyMeasurements); // getDictionary
+    var bms = bmDict["body_measurements"] || [];
+    for (var bi = 0; bi < bms.length && bodyWeightNum === 0; bi++) {
+      var bmwTxt = txt(bms[bi]["weight_kg"]);
+      if (bmwTxt !== "") {
+        var bmwNum = toNumber(bmwTxt);
+        if (bmwNum > 0) bodyWeightNum = bmwNum;
+      }
+    }
+  }
+
   var wsDict = {};
   var muscleOrder = [];
   var rmJsonParts = [];
+  var volExParts = [];
+  var volDict = {};
+  var volMuscleOrder = [];
   if (errFlag === 0) {
     var exercises = routine["exercises"] || [];
     if (!Array.isArray(exercises)) exercises = [];
@@ -151,6 +201,7 @@ function runNative(apiKey, api) {
       if (tid === "") return;
 
       var best = 0;
+      var vol = 0;
       var historyJson = api.history[tid] || "";
       if (historyJson !== "") {
         var historyDict = JSON.parse(historyJson);
@@ -166,18 +217,34 @@ function runNative(apiKey, api) {
           var rTxt = txt(e.reps);
           var rNum = 0;
           if (rTxt !== "") rNum = toNumber(rTxt);
-          if (!(wNum > 0)) return;
+          // Effective weight: logged weight, else body weight for
+          // bodyweight sets (null/0 weight_kg) when known.
+          var effW = 0;
+          if (wNum > 0) effW = wNum;
+          else if (bodyWeightNum > 0) effW = bodyWeightNum;
+          if (!(effW > 0)) return;
           if (!(rNum >= 1)) return;
           if (!(rNum <= 30)) return;
-          var est = rNum === 1 ? wNum * 1 : wNum * (1 + rNum / 30);
+          var est = rNum === 1 ? effW * 1 : effW * (1 + rNum / 30);
           if (est > best) best = est;
+          vol = vol + effW * rNum;
         });
       }
+      var title = txt(ex.title);
+      if (title === "") title = tid;
       if (best > 0) {
         var bestR = Math.round(best * 10) / 10;
-        var title = txt(ex.title);
-        if (title === "") title = tid;
         rmJsonParts.push('"' + esc(title) + '": ' + bestR);
+      }
+      if (vol > 0) {
+        var volR = Math.round(vol * 10) / 10;
+        volExParts.push('"' + esc(title) + '": ' + volR);
+        var curVol = volDict[muscle];
+        if (curVol === undefined || curVol === "") {
+          volDict[muscle] = 0;
+          volMuscleOrder.push(muscle);
+        }
+        volDict[muscle] = Math.round((volDict[muscle] + volR) * 10) / 10;
       }
     });
   }
@@ -187,10 +254,19 @@ function runNative(apiKey, api) {
       return '"' + esc(m) + '": ' + wsDict[m];
     })
     .join(", ");
+  var volMuscleEntries = volMuscleOrder
+    .map(function (m) {
+      return '"' + esc(m) + '": ' + volDict[m];
+    })
+    .join(", ");
 
+  var bwJsonVal = bodyWeightNum > 0 ? String(bodyWeightNum) : "null";
   var resultJson =
     '{"routineName": "' + esc(routineName) + '", "workingSetsPerMuscleGroup": {' +
-    wsEntries + '}, "oneRepMaxKgPerExercise": {' + rmJsonParts.join(", ") + "}}";
+    wsEntries + '}, "volumeKgPerExercise": {' + volExParts.join(", ") +
+    '}, "volumeKgPerMuscleGroup": {' + volMuscleEntries +
+    '}, "oneRepMaxKgPerExercise": {' + rmJsonParts.join(", ") +
+    '}, "bodyWeightKgUsed": ' + bwJsonVal + "}";
 
   var errJson =
     '{"_error": "' + esc(errMsg) + '", "_context": {"stage": "' + errStage +
@@ -227,6 +303,7 @@ function happyApi() {
   return {
     routines: JSON.stringify(load("api-routines.json")),
     template: singleTemplates(),
+    bodyMeasurements: JSON.stringify({ body_measurements: [] }),
     history: {
       "tpl-bench": JSON.stringify(load("api-history-bench.json")),
       "tpl-ohp": JSON.stringify(load("api-history-ohp.json")),
@@ -239,12 +316,20 @@ function happyApi() {
 var EXPECTED = {
   routineName: "Push Day",
   workingSetsPerMuscleGroup: { chest: 5, shoulders: 3, triceps: 2, other: 2 },
+  volumeKgPerExercise: {
+    "Bench Press (Barbell)": 917.5,
+    "Overhead Press (Dumbbell)": 575,
+    "Triceps Pushdown (Cable)": 360,
+    "Mystery Machine": 700,
+  },
+  volumeKgPerMuscleGroup: { chest: 917.5, shoulders: 575, triceps: 360, other: 700 },
   oneRepMaxKgPerExercise: {
     "Bench Press (Barbell)": 116.7,
     "Overhead Press (Dumbbell)": 51,
     "Triceps Pushdown (Cable)": 42,
     "Mystery Machine": 93.3,
   },
+  bodyWeightKgUsed: null,
 };
 
 var failures = 0;
@@ -279,6 +364,21 @@ check("happy path: oneRepMaxKgPerExercise", function () {
     runNative("KEY", happyApi()).result.oneRepMaxKgPerExercise,
     EXPECTED.oneRepMaxKgPerExercise
   );
+});
+check("happy path: volumeKgPerExercise", function () {
+  assert.deepStrictEqual(
+    runNative("KEY", happyApi()).result.volumeKgPerExercise,
+    EXPECTED.volumeKgPerExercise
+  );
+});
+check("happy path: volumeKgPerMuscleGroup", function () {
+  assert.deepStrictEqual(
+    runNative("KEY", happyApi()).result.volumeKgPerMuscleGroup,
+    EXPECTED.volumeKgPerMuscleGroup
+  );
+});
+check("happy path: bodyWeightKgUsed null when unknown", function () {
+  assert.strictEqual(runNative("KEY", happyApi()).result.bodyWeightKgUsed, null);
 });
 check("happy path: chest working sets include dup exercise", function () {
   // tpl-bench appears twice (4 + 1 working sets) -> chest == 5
@@ -374,7 +474,8 @@ check("edge: no history -> no 1RMs", function () {
 check("edge: null weight_kg (bodyweight) never reaches number()", function () {
   // Regression: Sep 30 device failure — Shortcuts' Number action fails on
   // empty text; bodyweight history has weight_kg: null. Must not throw and
-  // must simply omit the exercise from 1RMs.
+  // must simply omit the exercise from 1RMs and volume when no body weight
+  // is known.
   var api = happyApi();
   api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
     { weight_kg: null, reps: 12, set_type: "normal" },
@@ -384,6 +485,8 @@ check("edge: null weight_kg (bodyweight) never reaches number()", function () {
   var r = runNative("KEY", api);
   assert.strictEqual(r.notifications.length, 0);
   assert.ok(!("Bench Press (Barbell)" in r.result.oneRepMaxKgPerExercise));
+  assert.ok(!("Bench Press (Barbell)" in r.result.volumeKgPerExercise));
+  assert.strictEqual(r.result.bodyWeightKgUsed, null);
   assert.strictEqual(r.result.workingSetsPerMuscleGroup.chest, 5);
 });
 check("edge: empty exercises", function () {
@@ -394,6 +497,83 @@ check("edge: empty exercises", function () {
   var r = runNative("KEY", api);
   assert.deepStrictEqual(r.result.workingSetsPerMuscleGroup, {});
   assert.deepStrictEqual(r.result.oneRepMaxKgPerExercise, {});
+  assert.deepStrictEqual(r.result.volumeKgPerExercise, {});
+  assert.deepStrictEqual(r.result.volumeKgPerMuscleGroup, {});
+});
+check("input: JSON dict text with body_weight_kg -> bodyweight 1RM + volume", function () {
+  var api = happyApi();
+  api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" },
+    { weight_kg: null, reps: 10, set_type: "normal" },
+    { weight_kg: 0, reps: 8, set_type: "normal" }
+  ]});
+  var r = runNative('{"api_key": "KEY", "body_weight_kg": 70}', api);
+  assert.strictEqual(r.errFlag, 0);
+  assert.strictEqual(r.notifications.length, 0);
+  // 1RM: 70 * (1 + 12/30) = 98 ; volume: 70 * (12+10+8) = 2100
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 98);
+  assert.strictEqual(r.result.volumeKgPerExercise["Bench Press (Barbell)"], 2100);
+  assert.strictEqual(r.result.volumeKgPerMuscleGroup.chest, 2100);
+  assert.strictEqual(r.result.bodyWeightKgUsed, 70);
+});
+check("input: plist-style dict text (real Dictionary object) parses", function () {
+  // "{ShortcutInput}" on a Dictionary object yields plist-style text.
+  var api = happyApi();
+  api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" }
+  ]});
+  var plist = '{\n    api_key = "KEY";\n    body_weight_kg = 70;\n}';
+  var r = runNative(plist, api);
+  assert.strictEqual(r.errFlag, 0);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 98);
+  assert.strictEqual(r.result.volumeKgPerExercise["Bench Press (Barbell)"], 840);
+  assert.strictEqual(r.result.bodyWeightKgUsed, 70);
+});
+check("input: dict missing api_key -> read-input error", function () {
+  var r = runNative('{"body_weight_kg": 70}', happyApi());
+  assert.strictEqual(r.errFlag, 1);
+  assert.strictEqual(r.result._error, "Missing API key");
+  assert.strictEqual(r.result._context.stage, "read-input");
+});
+check("body weight: Hevy body_measurements fallback", function () {
+  var api = happyApi();
+  api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" }
+  ]});
+  api.bodyMeasurements = JSON.stringify({ body_measurements: [
+    { date: "2026-09-30", weight_kg: null },
+    { date: "2026-09-29", weight_kg: 72.5 }
+  ]});
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.errFlag, 0);
+  assert.strictEqual(r.result.bodyWeightKgUsed, 72.5);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 101.5);
+  assert.strictEqual(r.result.volumeKgPerExercise["Bench Press (Barbell)"], 870);
+});
+check("body weight: explicit input beats Hevy measurement", function () {
+  var api = happyApi();
+  api.history["tpl-bench"] = JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" }
+  ]});
+  api.bodyMeasurements = JSON.stringify({ body_measurements: [
+    { date: "2026-09-30", weight_kg: 99 }
+  ]});
+  var r = runNative('{"api_key": "KEY", "body_weight_kg": 70}', api);
+  assert.strictEqual(r.result.bodyWeightKgUsed, 70);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 98);
+});
+check("body weight: logged weight wins, bodyweight sets gain metrics", function () {
+  // Bench fixture mixes weighted sets with bodyweight sets (0x12, nullx8):
+  // the weighted best (116.7) still wins the 1RM, while the bodyweight
+  // sets now contribute 70*(12+8) = 1400 to volume. OHP is all-weighted,
+  // so its numbers must be identical with or without body weight.
+  var api = happyApi();
+  var r = runNative('{"api_key": "KEY", "body_weight_kg": 70}', api);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 116.7);
+  assert.strictEqual(r.result.volumeKgPerExercise["Bench Press (Barbell)"], 2317.5);
+  assert.strictEqual(r.result.oneRepMaxKgPerExercise["Overhead Press (Dumbbell)"], 51);
+  assert.strictEqual(r.result.volumeKgPerExercise["Overhead Press (Dumbbell)"], 575);
+  assert.strictEqual(r.result.bodyWeightKgUsed, 70);
 });
 
 if (failures > 0) {

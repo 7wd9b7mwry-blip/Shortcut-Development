@@ -142,8 +142,13 @@ function runPipeline() {
     "api-history-missing.json"
   ];
   var entries = [];
+  var seenTid = {};
   for (var i = 0; i < histFiles.length; i++) {
     var tid = r.exercises[i].templateId;
+    if (seenTid[tid]) {
+      continue; // shortcut fetches history once per template id (seenTids)
+    }
+    seenTid[tid] = true;
     var parsed = stats.parseHistoryResponse(fixture(histFiles[i]), tid);
     for (var j = 0; j < parsed.length; j++) {
       entries.push(parsed[j]);
@@ -168,6 +173,49 @@ checkClose("pipeline 1RM triceps (30x12 -> 42.0)",
   push.oneRepMaxKgPerExercise["Triceps Pushdown (Cable)"], 42.0);
 checkClose("pipeline 1RM missing template (70x10 -> 93.3)",
   push.oneRepMaxKgPerExercise["Mystery Machine"], 93.3);
+check("pipeline volume per exercise",
+  push.volumeKgPerExercise, {
+    "Bench Press (Barbell)": 917.5,
+    "Overhead Press (Dumbbell)": 575,
+    "Triceps Pushdown (Cable)": 360,
+    "Mystery Machine": 700
+  });
+check("pipeline volume per muscle",
+  push.volumeKgPerMuscleGroup, {
+    chest: 917.5,
+    shoulders: 575,
+    triceps: 360,
+    other: 700
+  });
+check("pipeline bodyWeightKgUsed null when unknown",
+  push.bodyWeightKgUsed, null);
+
+// --- Volume + bodyweight ---
+check("effectiveWeightKg: logged weight wins", stats.effectiveWeightKg(100, 70), 100);
+check("effectiveWeightKg: null falls back to body weight", stats.effectiveWeightKg(null, 70), 70);
+check("effectiveWeightKg: zero falls back to body weight", stats.effectiveWeightKg(0, 70), 70);
+check("effectiveWeightKg: unknown without body weight", stats.effectiveWeightKg(null, undefined), 0);
+check("effectiveWeightKg: non-positive body weight ignored", stats.effectiveWeightKg(null, 0), 0);
+
+(function testBodyweight() {
+  var r = stats.parseRoutinesResponse(fixture("api-routines.json"));
+  var m = stats.parseTemplatesResponse(fixture("api-templates.json"));
+  var entries = stats.parseHistoryResponse(JSON.stringify({ exercise_history: [
+    { weight_kg: null, reps: 12, set_type: "normal" },
+    { weight_kg: null, reps: 10, set_type: "normal" },
+    { weight_kg: null, reps: null, set_type: "normal" }
+  ]}), "tpl-bench");
+  var out = stats.computeStats({ routine: r, muscleByTemplate: m, historyEntries: entries, bodyWeightKg: 70 });
+  checkClose("bodyweight 1RM (70x12 -> 98)", out.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 98);
+  check("bodyweight volume (70x22)", out.volumeKgPerExercise["Bench Press (Barbell)"], 1540);
+  check("bodyweight volume per muscle", out.volumeKgPerMuscleGroup, { chest: 1540 });
+  check("bodyweight bodyWeightKgUsed", out.bodyWeightKgUsed, 70);
+
+  var outNoBw = stats.computeStats({ routine: r, muscleByTemplate: m, historyEntries: entries });
+  check("bodyweight omitted without body weight (1RM)", outNoBw.oneRepMaxKgPerExercise, {});
+  check("bodyweight omitted without body weight (volume)", outNoBw.volumeKgPerExercise, {});
+  check("bodyweight bodyWeightKgUsed null", outNoBw.bodyWeightKgUsed, null);
+})();
 
 // --- epley unit checks ---
 check("epley reps=1 returns weight", stats.epley1RM(110, 1), 110);

@@ -201,3 +201,53 @@ misses. 372 actions (was 400). native-sim.js: 20 tests (new regression
 mocks the Pull Up single-template response as "lats" (assumed — the device
 run reports the real value; update the mock if different). Re-signed,
 re-pushed, re-delivered.
+
+## Volume + bodyweight metrics (Sep 30, 2026)
+
+Daniel asked for (a) total volume per exercise and per muscle group, and
+(b) a usable metric for bodyweight exercises, where 1RM is not indicative.
+
+Design decisions (all Daniel-approved direction, judgment calls disclosed):
+- Input is now EITHER plain API key text (backwards compatible) OR a
+  dictionary {"api_key": "...", "body_weight_kg": 70}. Three shapes are
+  accepted: JSON text, a real Dictionary object (which "{ShortcutInput}"
+  coerces to plist-style text: api_key = "UUID";), and plain key text.
+  getDictionary is only ever called on text containing "\"api_key\"".
+- Bodyweight set = history set with null/0 weight_kg and valid reps.
+  Effective weight = logged weight when > 0, else body weight when known.
+- Body weight precedence: explicit body_weight_kg input > latest Hevy
+  body measurement (GET /v1/body_measurements, newest first, first
+  positive weight_kg wins) > unknown. A miss is tolerated, never an error.
+- 1RM now uses effective weight, so Pull Up appears when body weight is
+  known (Epley on total weight — standard for weighted calisthenics).
+  Logged weights always win; body weight never inflates a weighted set.
+- Volume = sum of effective-weight x reps over the SAME qualifying sets
+  as 1RM (normal/failure/dropset, warmup excluded, 1-30 reps, effective
+  weight > 0) from the fetched history — "working volume". Per exercise
+  (title-keyed) and per muscle group, rounded to 0.1 kg. Zero-volume
+  exercises are omitted, mirroring the 1RM omission rule.
+- New output keys: volumeKgPerExercise, volumeKgPerMuscleGroup,
+  bodyWeightKgUsed (number or null). Success dictionary now has 6 keys.
+- A dict-shaped input WITHOUT api_key (contains "{" but no api_key)
+  leaves @apiKey empty so the read-input error fires — it is never
+  treated as a key.
+
+Cherri gotchas hit while building:
+- getLastItem/getFirstItem return untyped `variable`; feeding them to
+  splitText/replaceText fails the type checker. Coerce via "{@var}" first
+  (same pattern as downloadURL/getValue outputs).
+- round() rejects a compound expression as its first arg
+  (round(@a + @b, "Tenths") fails); assign to a temp first.
+- A literal `{` inside a double-quoted string is parsed as an inline
+  variable reference; use single-quoted raw strings for messages
+  containing JSON examples.
+- @empty cannot be referenced before its definition line; use "" literal.
+
+576 actions (was 372). native-sim.js: 26 tests (new: JSON/plist/dict
+input shapes, dict-without-api_key error, Hevy body_measurements
+fallback, input-beats-Hevy precedence, logged-weight-wins). Audit of the
+unsigned build: zero 100/101 conditions, no HTML/JS/Ask, 4 downloadURL
+(routines, body_measurements, template, history), 3 showresult, valid
+AEA1 signature on the signed artifact. real-fixtures-check: Daniel's
+data -> bench volume 1646.5 kg; with body_weight_kg 70, Pull Up gains
+1RM 98 and volume 2310. Re-signed, re-pushed, re-delivered.
