@@ -1,0 +1,79 @@
+// ============================================================================
+// Function: parseInput()
+//   in:  ShortcutInput
+//   out: apiKey (text), bodyWeightTxt (text, "" when absent),
+//        outputFormat ("record_metrics" | "stats"; defaults to
+//        "record_metrics")
+//
+// Input shapes: plain API key text (backwards compatible), JSON dictionary
+// text {"api_key": "...", "body_weight_kg": 70, "output_format": "..."},
+// or a real Dictionary object (which coerces to plist-style text:
+// api_key = "UUID";). The quoted-key check keeps getDictionary away from
+// plain key text.
+
+@inputTxt = "{ShortcutInput}"
+@apiKey = ""
+@bodyWeightTxt = ""
+@outputFormat = "record_metrics"
+if @inputTxt contains "\"api_key\"" {
+    @inputDict = getDictionary(@inputTxt)
+    @keyVal = getValue(@inputDict, "api_key")
+    @apiKey = "{@keyVal}"
+    @bwVal = getValue(@inputDict, "body_weight_kg")
+    @bodyWeightTxt = "{@bwVal}"
+    @ofVal = getValue(@inputDict, "output_format")
+    @ofTxt = "{@ofVal}"
+    if @ofTxt != @empty {
+        @outputFormat = @ofTxt
+    }
+} else {
+    if @inputTxt contains "api_key" {
+        // Plist-style dictionary text: api_key = "UUID"; body_weight_kg = 70;
+        @kpParts = splitText(@inputTxt, "api_key = \"")
+        @kpTail = getLastItem(@kpParts)
+        @kpTailTxt = "{@kpTail}"
+        @kvParts = splitText(@kpTailTxt, "\"")
+        @apiKey = getFirstItem(@kvParts)
+        if @inputTxt contains "body_weight_kg" {
+            @wpParts = splitText(@inputTxt, "body_weight_kg = ")
+            @wpTail = getLastItem(@wpParts)
+            @wpTailTxt = "{@wpTail}"
+            @wpNoQuotes = replaceText("\"", "", @wpTailTxt)
+            @wvParts = splitText(@wpNoQuotes, ";")
+            @bodyWeightTxt = getFirstItem(@wvParts)
+        }
+        if @inputTxt contains "output_format" {
+            @ofParts = splitText(@inputTxt, "output_format = ")
+            @ofTail = getLastItem(@ofParts)
+            @ofTailTxt = "{@ofTail}"
+            @ofNoQuotes = replaceText("\"", "", @ofTailTxt)
+            @ofVParts = splitText(@ofNoQuotes, ";")
+            @ofFirst = getFirstItem(@ofVParts)
+            @ofFirstTxt = "{@ofFirst}"
+            if @ofFirstTxt != @empty {
+                @outputFormat = @ofFirstTxt
+            }
+        }
+    } else {
+        if @inputTxt contains '{' {
+            // Dict-shaped but no api_key: leave @apiKey empty so the
+            // missing-key error below fires (a no-op assignment keeps
+            // the branch non-empty for the compiler).
+            @apiKey = ""
+        } else {
+            @apiKey = @inputTxt
+        }
+    }
+}
+// getFirstItem/getLastItem return untyped variables; coerce to text for the
+// type checker (same pattern as downloadURL/getValue outputs elsewhere).
+@apiKey = "{@apiKey}"
+@bodyWeightTxt = "{@bodyWeightTxt}"
+@outputFormat = "{@outputFormat}"
+
+if @apiKey == @empty {
+    @errFlag = 1
+    @errStage = "read-input"
+    @errMsg = "Missing API key"
+    @errDetail = 'Shortcut Input was empty, or the input dictionary had no api_key. Pass your Hevy API key as the shortcut input, or a JSON dictionary {"api_key": "...", "body_weight_kg": 70}.'
+}

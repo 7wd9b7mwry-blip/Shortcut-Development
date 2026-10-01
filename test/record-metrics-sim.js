@@ -1,13 +1,19 @@
-// Simulation of shortcut/hevy-record-metrics.cherri.
+// Simulation of the buildRecordMetrics() section (shortcut/lib/50-records.cherri).
 //
-// Mirrors the wrapper transform: Hevy Stats result dictionary -> list of
+// Mirrors the merged-shortcut transform: stats dictionary -> list of
 // RecordMetric dictionaries (docs/RECORD_METRIC.md). Feeds the REAL
-// native-sim pipeline (test/native-sim.js) so the wrapper is tested against
-// the same fixtures, plus Daniel's local real-data fixtures.
+// native-sim pipeline (test/native-sim.js) so the records are tested
+// against the same fixtures, plus Daniel's local real-data fixtures.
 //
-// The Cherri wrapper builds the list as JSON text (real booleans/numbers)
-// and parses it with getDictionary; this sim builds the equivalent JS
-// objects directly and asserts the exact record shapes.
+// The Cherri section builds each record as its own JSON object (so
+// Set Value is a REAL number and Increment/Decrement/Reset are REAL
+// booleans), parses it with getDictionary, and appends it to a real List
+// with Add to Variable. This sim:
+//   1. mirrors the transform logic (which records, which values), and
+//   2. extracts the ACTUAL @recJson templates from 50-records.cherri,
+//      renders them with test values (including quote/backslash edge
+//      cases), and asserts each renders to valid JSON with the right
+//      types — catching template bugs in the real source.
 //
 // Run: node test/record-metrics-sim.js
 "use strict";
@@ -25,7 +31,7 @@ var factory = new Function(
 );
 var sim = factory(require, __dirname, fs, path, assert);
 
-// Wrapper transform, mirroring hevy-record-metrics.cherri:
+// Wrapper transform, mirroring 50-records.cherri:
 // - handled _error dicts pass through unchanged (no records fabricated)
 // - otherwise one RecordMetric dict per metric, key order matching the
 //   Record Metrics form (Form Name, Metric Name, Set Value, Increment,
@@ -64,6 +70,61 @@ function toRecordMetrics(stats) {
     rec("Hevy - Routine", stats.routineName + " duration", stats.routineDurationMinutes);
   }
   return out;
+}
+
+// --- Template fidelity: render the REAL @recJson templates ---------------
+// Extract each `@recJson = "..."` template from 50-records.cherri, convert
+// Cherri string syntax to plain text, substitute test values, and verify
+// the result is valid JSON with correctly typed fields.
+function cherriEscape(s) {
+  // Mirrors the Cherri: replaceText("\\", "\\\\", x) then
+  // replaceText("\"", "\\\"", x).
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function renderTemplate(cherriLine, vars) {
+  // cherriLine is the full `@recJson = "..."` source line.
+  var m = cherriLine.match(/@recJson = "(.*)"\s*$/);
+  assert.ok(m, "could not parse template line: " + cherriLine.slice(0, 80));
+  var body = m[1];
+  var out = "";
+  for (var i = 0; i < body.length; i++) {
+    var c = body[i];
+    if (c === "\\" && i + 1 < body.length) {
+      var n = body[i + 1];
+      if (n === '"') { out += '"'; i++; continue; }
+      if (n === "\\") { out += "\\"; i++; continue; }
+      out += c;
+      continue;
+    }
+    if (c === "{") {
+      var j = body.indexOf("}", i);
+      assert.ok(j > i, "unbalanced { in template");
+      var ref = body.slice(i + 1, j); // e.g. @ob, @safeM, @wsTxt
+      if (ref === "@ob") out += "{";
+      else if (ref === "@cb") out += "}";
+      else {
+        assert.ok(Object.prototype.hasOwnProperty.call(vars, ref),
+          "no test value for " + ref);
+        out += vars[ref];
+      }
+      i = j;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function getRecTemplates() {
+  var src = fs.readFileSync(
+    path.join(__dirname, "..", "shortcut", "lib", "50-records.cherri"), "utf8");
+  var lines = src.split("\n").filter(function (l) {
+    return l.indexOf("@recJson = ") !== -1;
+  });
+  assert.ok(lines.length === 7,
+    "expected 7 @recJson templates, found " + lines.length);
+  return lines;
 }
 
 var failures = 0;
@@ -175,6 +236,52 @@ check("real data: Sample routine records", function () {
   assert.strictEqual(find(records, "Hevy - Routine", "Sample volume")["Set Value"], 1646.5);
   assert.strictEqual(find(records, "Hevy - Routine", "Sample duration")["Set Value"], 0.3);
   assert.strictEqual(find(records, "Hevy - Muscle Group", "chest working sets")["Set Value"], 3);
+});
+
+// --- The 7 real templates render to valid, correctly-typed JSON -----------
+var TEMPLATE_CASES = [
+  // [templateIndex, vars, expectedMetricName, expectedSetValue]
+  [0, { "@safeM": cherriEscape("chest"), "@wsTxt": "5" },
+   "chest working sets", 5],
+  [1, { "@safeM": cherriEscape("chest"), "@volTxt": "917.5" },
+   "chest volume", 917.5],
+  [2, { "@safeT": cherriEscape("Bench Press (Barbell)"), "@volTxt": "917.5" },
+   "Bench Press (Barbell) volume", 917.5],
+  [3, { "@safeT": cherriEscape("Bench Press (Barbell)"), "@rmTxt": "116.7" },
+   "Bench Press (Barbell) 1RM", 116.7],
+  [4, { "@safeR": cherriEscape("Push Day"), "@rWsTxt": "12" },
+   "Push Day working sets", 12],
+  [5, { "@safeR": cherriEscape("Push Day"), "@rVolTxt": "2552.5" },
+   "Push Day volume", 2552.5],
+  [6, { "@safeR": cherriEscape("Push Day"), "@rDurTxt": "47.3" },
+   "Push Day duration", 47.3]
+];
+
+TEMPLATE_CASES.forEach(function (tc, k) {
+  check("template " + tc[0] + " renders valid typed JSON (" + tc[2] + ")", function () {
+    var lines = getRecTemplates();
+    var json = renderTemplate(lines[tc[0]], tc[1]);
+    var rec = JSON.parse(json); // throws on invalid JSON
+    assert.strictEqual(rec["Metric Name"], tc[2]);
+    assert.strictEqual(rec["Set Value"], tc[3]);
+    assert.strictEqual(typeof rec["Set Value"], "number");
+    assert.strictEqual(rec["Increment"], false);
+    assert.strictEqual(rec["Decrement"], false);
+    assert.strictEqual(rec["Reset"], false);
+    assert.strictEqual(rec["Increment Amount"], "");
+    assert.ok(rec["Form Name"].indexOf("Hevy - ") === 0);
+  });
+});
+
+check("templates survive hostile names (quotes, backslashes)", function () {
+  var lines = getRecTemplates();
+  var hostile = 'Weird "Quoted" \\ Backslash';
+  var json = renderTemplate(lines[2], {
+    "@safeT": cherriEscape(hostile), "@volTxt": "10"
+  });
+  var rec = JSON.parse(json);
+  assert.strictEqual(rec["Metric Name"], hostile + " volume");
+  assert.strictEqual(rec["Set Value"], 10);
 });
 
 if (failures > 0) {

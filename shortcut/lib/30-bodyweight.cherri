@@ -1,0 +1,39 @@
+// ============================================================================
+// Function: resolveBodyWeight()
+//   in:  apiKey, bodyWeightTxt
+//   out: bodyWeightNum (number; 0 = unknown)
+//
+// Precedence: explicit body_weight_kg input > latest Hevy body measurement
+// with weight > 0 > unknown (0). Measurements are newest-first; the first
+// entry carrying a positive weight wins. A miss is tolerated, never an
+// error: bodyweight sets then simply get no weight-based metrics.
+
+@bodyWeightNum = 0
+if @errFlag == 0 {
+    if @bodyWeightTxt != @empty {
+        @bodyWeightNum = number(@bodyWeightTxt)
+    }
+}
+if @errFlag == 0 {
+    if @bodyWeightNum == 0 {
+        @bmJson = downloadURL("https://api.hevyapp.com/v1/body_measurements?page=1&pageSize=10", {"api-key": "{@apiKey}"})
+        @bmTxt = "{@bmJson}"
+        if @bmTxt != @empty {
+            @bmDict = getDictionary(@bmJson)
+            @bms = getValue(@bmDict, "body_measurements")
+            for bm in @bms {
+                if @bodyWeightNum == 0 {
+                    @bmEntry = getDictionary(@bm)
+                    @bmwVal = getValue(@bmEntry, "weight_kg")
+                    @bmwTxt = "{@bmwVal}"
+                    if @bmwTxt != @empty {
+                        @bmwNum = number(@bmwTxt)
+                        if @bmwNum > 0 {
+                            @bodyWeightNum = @bmwNum
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,46 @@
+// ============================================================================
+// Function: fetchRoutine()
+//   in:  apiKey
+//   out: routineDict, routineName — the most recently updated routine
+//        (the API returns routines newest-first).
+//        Sets errFlag/errStage/errMsg/errDetail on failure.
+
+if @errFlag == 0 {
+    @routinesJson = downloadURL("https://api.hevyapp.com/v1/routines?page=1&pageSize=10", {"api-key": "{@apiKey}"})
+    @routinesTxt = "{@routinesJson}"
+    if @routinesTxt == @empty {
+        @errFlag = 1
+        @errStage = "fetch-routines"
+        @errMsg = "Routines request returned no data"
+        @errDetail = "GET /v1/routines came back empty. Check your network connection."
+    }
+}
+
+if @errFlag == 0 {
+    @routinesDict = getDictionary(@routinesJson)
+    @routinesList = getValue(@routinesDict, "routines")
+    @nRoutines = count(@routinesList)
+    if @nRoutines == 0 {
+        @errFlag = 1
+        @errStage = "parse-routines"
+        @errMsg = "No usable routines in response"
+        @errDetail = "The /v1/routines response had no routines list. Check that the API key is correct and Hevy Pro is active."
+        @apiMsg = getValue(@routinesDict, "message")
+        @apiMsgTxt = "{@apiMsg}"
+        if @apiMsgTxt != @empty {
+            @errDetail = "The Hevy API itself reported an error: {@apiMsgTxt}"
+        }
+    }
+}
+if @errFlag == 0 {
+    @routine = getFirstItem(@routinesList)
+    @routineDict = getDictionary(@routine)
+    @routineTitle = getValue(@routineDict, "title")
+    @routineName = "{@routineTitle}"
+    if @routineName == @empty {
+        @errFlag = 1
+        @errStage = "parse-routines"
+        @errMsg = "First routine has no title"
+        @errDetail = "The most recently updated routine has no usable 'title'."
+    }
+}

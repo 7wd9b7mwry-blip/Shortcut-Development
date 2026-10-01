@@ -331,3 +331,44 @@ Hevy Stats worked), but its `if @inputTxt contains "{"` had the same bug
 
 `build/build.py` now fails the build if any .cherri source contains a
 double-quoted lone `"{"` or `"}"`.
+
+## MERGE (Oct 1, 2026): one shortcut, modular lib/ source
+
+Daniel asked to merge the two shortcuts: Hevy Stats now outputs the
+RecordMetric list directly, and the source is organized into "functions"
+for easier future building. Cherri has no #include for code and no
+user-defined functions, and Shortcuts itself is a linear action list —
+so modularity is by convention: the source is split into
+`shortcut/lib/*.cherri` parts, one function per file with a documented
+in/out contract, and build.py concatenates them in filename order before
+compiling.
+
+Parts: 00-header (docs, includes, custom actions, sentinels),
+10-input (parseInput), 20-routine (fetchRoutine),
+30-bodyweight (resolveBodyWeight), 40-analysis (analyzeExercises),
+50-records (buildRecordMetrics), 60-output (emitOutput).
+
+The old shortcut boundary (Run Shortcut call) became a variable handoff:
+analyzeExercises() -> resultJson -> buildRecordMetrics() -> records.
+
+List construction: each record is built as its own JSON object
+(single-quoted brace literals, per FIX 7), parsed with getDictionary
+(real numbers/booleans), and appended to a real List with Add to
+Variable (is.workflow.actions.appendvariable, declared raw with the
+`: variable {` body syntax — a bodyless custom action declaration
+breaks `{@var}` parsing below it, found while probing).
+
+New input option: `{"api_key": "...", "output_format": "stats"}` returns
+the raw stats dictionary instead of the RecordMetric list, so the
+analysis stays reusable as a "function" for other shortcuts via
+Run Shortcut. Default output_format is "record_metrics".
+
+The wrapper shortcut (Hevy Record Metrics) is retired: its source is
+deleted, build.py no longer builds it, and Daniel should delete it from
+his iPhone. Record order (muscles, exercises, routine totals) and the
+error pass-through contract are unchanged.
+
+Tests: 69 (run-tests.js), 35 (native-sim.js), record-metrics-sim.js now
+also renders the ACTUAL @recJson templates extracted from
+50-records.cherri and asserts each parses to valid JSON with typed
+values (7 template tests + hostile-name escaping test).

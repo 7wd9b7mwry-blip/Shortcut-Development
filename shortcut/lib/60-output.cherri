@@ -1,0 +1,40 @@
+// ============================================================================
+// Function: emitOutput()
+//   in:  errFlag, errMsg, errDetail, errStage,
+//        outputFormat, finalResult, records, displayJson, resultJson
+//   out: @out — the shortcut's result.
+//
+// Exactly one branch runs (two separate explicit checks: no else, no
+// truthiness).
+//
+// NOTE: `show()` is Show Result — the only way a manually-run shortcut
+// displays anything. The success branches MUST show, otherwise a good run
+// ends with no visible response (found by device testing, Sep 30 2026).
+
+if @errFlag == 1 {
+    @safeErrMsg = replaceText("\\", "\\\\", @errMsg)
+    @safeErrMsg = replaceText("\"", "\\\"", @safeErrMsg)
+    @safeErrDetail = replaceText("\\", "\\\\", @errDetail)
+    @safeErrDetail = replaceText("\"", "\\\"", @safeErrDetail)
+    @errJson = "{@ob}\"_error\": \"{@safeErrMsg}\", \"_context\": {@ob}\"stage\": \"{@errStage}\", \"detail\": \"{@safeErrDetail}\" {@cb}{@cb}"
+    show("Hevy Stats error: {@errMsg} ({@errDetail})")
+    @outValue = getDictionary(@errJson)
+}
+
+if @errFlag == 0 {
+    if @outputFormat == "stats" {
+        show("{@resultJson}")
+        @outValue = @finalResult
+    }
+    if @outputFormat != "stats" {
+        show("{@displayJson}")
+        @outValue = @records
+    }
+}
+
+// The shortcut's output is its last action's output. This assignment MUST
+// stay the final action of the whole shortcut (no trailing no-op If):
+// callers using Run Shortcut receive whatever @outValue holds — the
+// RecordMetric list, the stats dictionary, or the handled-error
+// dictionary.
+@out = @outValue

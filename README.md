@@ -54,7 +54,7 @@ A history set with no logged weight (`weight_kg` null or 0) is treated as a body
 
 Volume and 1RM share one definition of a qualifying set: type `normal`/`failure`/`dropset` (warmup excluded), effective weight > 0, reps 1–30. Exercises with no qualifying set are omitted from those dictionaries.
 
-No JavaScript, no HTML, no Rich Text actions — the shortcut is pure native Shortcuts actions, compiled from `shortcut/hevy-stats.cherri` with [Cherri](https://github.com/grysvn/cherri).
+No JavaScript, no HTML, no Rich Text actions — the shortcut is pure native Shortcuts actions, assembled from `shortcut/lib/*.cherri` parts and compiled with [Cherri](https://github.com/grysvn/cherri).
 
 ## Repository layout
 
@@ -66,16 +66,18 @@ test/run-tests.js              Node test harness for the JS spec
 test/native-sim.js             Node simulation of the Cherri logic, same fixtures
 test/real-fixtures-check.js    Regression check against real API responses
                                (local-fixtures/, never committed)
-test/record-metrics-sim.js     Node simulation of the Record Metrics wrapper
+test/record-metrics-sim.js     Node simulation of the RecordMetric transform,
+                               incl. rendering the real @recJson templates
 test/fixtures/                 Hevy-shaped test data
-shortcut/hevy-stats.cherri     Cherri source (native actions)
-shortcut/hevy-record-metrics.cherri  Cherri source for the RecordMetric wrapper
-build/build.py                 Build script: compiles, post-processes, sanity-checks
+shortcut/lib/                  Cherri source, one "function" per file:
+                                 00-header, 10-input, 20-routine,
+                                 30-bodyweight, 40-analysis,
+                                 50-records, 60-output
+build/build.py                 Build script: assembles lib parts, compiles,
+                               post-processes, sanity-checks
 dist/HevyStats.shortcut        Compiled shortcut (unsigned)
 dist/HevyStats_signed.shortcut Compiled shortcut (signed via RoutineHub HubSign)
-dist/HevyRecordMetrics.shortcut        Compiled wrapper (unsigned)
-dist/HevyRecordMetrics_signed.shortcut Compiled wrapper (signed via RoutineHub HubSign)
-docs/RECORD_METRIC.md          The RecordMetric dictionary type + wrapper contract
+docs/RECORD_METRIC.md          The RecordMetric dictionary type + output contract
 ```
 
 ## Building and testing
@@ -83,12 +85,18 @@ docs/RECORD_METRIC.md          The RecordMetric dictionary type + wrapper contra
 ```bash
 node test/run-tests.js             # JS spec tests
 node test/native-sim.js            # native-logic simulation tests
-node test/record-metrics-sim.js    # Record Metrics wrapper tests
+node test/record-metrics-sim.js    # RecordMetric transform + template tests
 node test/real-fixtures-check.js   # real-response regression (needs local-fixtures/)
-python3 build/build.py             # compile + audit both shortcuts
+python3 build/build.py             # assemble lib parts, compile + audit
 ```
 
-To sign: `cherri shortcut/hevy-stats.cherri --hubsign --output=dist/HevyStats_signed.shortcut` (RoutineHub HubSign service).
+To sign the post-processed `dist/HevyStats.shortcut` via RoutineHub HubSign:
+
+```bash
+curl -X POST https://hubsign.routinehub.services/sign \
+  -F "shortcut=@dist/HevyStats.shortcut" \
+  -o dist/HevyStats_signed.shortcut
+```
 
 The build script post-processes the Cherri output to set `WFWorkflowHasShortcutInputVariables` and `WFWorkflowName`, and sanity-checks the compiled plist (no Ask/HTML/JavaScript actions, no bare-truthiness conditions, downloadurl present).
 

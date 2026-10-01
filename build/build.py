@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
-"""Build the Hevy shortcuts.
+"""Build the Hevy Stats shortcut.
 
-Compiles each .cherri source with Cherri (unsigned), post-processes the
-plist, and writes the final unsigned .shortcut to the dist dir:
+Compiles the .cherri source with Cherri (unsigned), post-processes the
+plist, and writes the final unsigned .shortcut to the dist dir.
 
-- Hevy Stats (shortcut/hevy-stats.cherri): the Hevy API analyzer. Pure
-  native Shortcuts actions (no JavaScript, no HTML); all parsing and math
-  mirror src/hevy-stats.js, which remains the tested spec
-  (see test/native-sim.js).
-- Hevy Record Metrics (shortcut/hevy-record-metrics.cherri): runs
-  Hevy Stats via Run Shortcut and converts its result into a list of
-  RecordMetric dictionaries (see docs/RECORD_METRIC.md).
+Hevy Stats (shortcut/lib/*.cherri): the Hevy API analyzer, whose output is
+a LIST of RecordMetric dictionaries (see docs/RECORD_METRIC.md), or the
+raw stats dictionary when the input dict carries "output_format": "stats".
+Pure native Shortcuts actions (no JavaScript, no HTML); all parsing and
+math mirror src/hevy-stats.js, which remains the tested spec
+(see test/native-sim.js).
+
+The .cherri source is split into lib/ parts — one "function" per file with
+a documented in/out contract (Cherri has no #include for code and
+Shortcuts has no subroutines, so modularity is by convention). build.py
+concatenates the parts in filename order and compiles the result.
 
 Post-processing sets WFWorkflowHasShortcutInputVariables so iOS knows the
 shortcut accepts input (the Hevy API key is passed as Shortcut Input, not
 prompted; Cherri does not set this flag for dictionary values).
 
-Sign the results with `cherri --hubsign` (or the repo's sign step) before
+Sign the result with `cherri --hubsign` (or the repo's sign step) before
 delivering to a device.
 
 The Hevy API key is taken from Shortcut Input at runtime. It is never
 stored in the shortcut or the repo.
 
-Usage: python3 build/build.py [hevy-stats|hevy-record-metrics]
-       (default: build both)
+Usage: python3 build/build.py
 """
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -33,23 +37,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "dist"
+LIB_DIR = ROOT / "shortcut" / "lib"
 
-# name -> (cherri source, installed WFWorkflowName, dist filename,
-#          must_have action, must_not_have actions)
+# name -> (installed WFWorkflowName, dist filename,
+#          must_have actions, must_not_have actions)
 SHORTCUTS = {
     "hevy-stats": (
-        "hevy-stats.cherri",
         "Hevy Stats",
         "HevyStats.shortcut",
-        "is.workflow.actions.downloadurl",
+        ("is.workflow.actions.downloadurl",
+         "is.workflow.actions.appendvariable"),  # API calls + list building
         (),
-    ),
-    "hevy-record-metrics": (
-        "hevy-record-metrics.cherri",
-        "Hevy Record Metrics",
-        "HevyRecordMetrics.shortcut",
-        "is.workflow.actions.runworkflow",
-        ("is.workflow.actions.downloadurl",),  # the wrapper makes no API calls itself
     ),
 }
 
@@ -59,10 +57,14 @@ def check_brace_literals(src_path: Path) -> int:
     text (it treats the brace as an interpolation start). Literal braces in
     double-quoted strings must use single quotes instead: '{' / '}'.
     Fail the build if the source contains the broken pattern."""
-    import re
     text = src_path.read_text()
     bad = []
     for i, line in enumerate(text.splitlines(), 1):
+        # Skip comment lines: doc comments legitimately mention "{" as an
+        # example of the broken pattern.
+        stripped = line.lstrip()
+        if stripped.startswith("//"):
+            continue
         # Match exactly "{" or "}" as a full double-quoted literal, or as a
         # contains/comparison operand: contains "{" / == "{" etc.  Anything
         # with more content ("{@x}", "{ShortcutInput}") is fine.
@@ -77,16 +79,41 @@ def check_brace_literals(src_path: Path) -> int:
     return 0
 
 
-def build_one(key: str, src_name: str, wf_name: str, dist_name: str,
-              must_have: str, must_not_have: tuple) -> int:
-    src_path = ROOT / "shortcut" / src_name
-    if check_brace_literals(src_path):
-        return 1
+def assemble_source(work: Path) -> Path:
+    """Concatenate shortcut/lib/*.cherri (filename order) into the single
+    source file Cherri compiles. Each part is checked for the
+    double-quoted-brace gotcha first."""
+    parts = sorted(LIB_DIR.glob("*.cherri"))
+    if not parts:
+        print(f"ERROR: no .cherri parts in {LIB_DIR}", file=sys.stderr)
+        raise SystemExit(1)
+    for part in parts:
+        if check_brace_literals(part):
+            raise SystemExit(1)
+    src_name = "hevy-stats.cherri"
+    dest = work / src_name
+    with dest.open("w") as out:
+        for part in parts:
+            out.write(f"// ---- assembled from shortcut/lib/{part.name} ----\n")
+            out.write(part.read_text())
+            if not part.read_text().endswith("\n"):
+                out.write("\n")
+            out.write("\n")
+    print(f"Assembled {len(parts)} parts -> {dest}")
+    return dest
+
+
+def build_one(key: str, wf_name: str, dist_name: str,
+              must_have: tuple, must_not_have: tuple) -> int:
     work = OUT_DIR / "work" / key
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
-    shutil.copy(ROOT / "shortcut" / src_name, work / src_name)
+    try:
+        src_path = assemble_source(work)
+    except SystemExit as e:
+        return int(e.code or 1)
+    src_name = src_path.name
 
     cherri = shutil.which("cherri") or str(Path.home() / ".local" / "bin" / "cherri")
     cmd = [cherri, src_name, "--skip-sign"]
@@ -132,29 +159,13 @@ def build_one(key: str, src_name: str, wf_name: str, dist_name: str,
                     print("ERROR: bare-truthiness condition 100/101 in compiled shortcut",
                           file=sys.stderr)
                     return 1
-    if must_have not in idents:
-        print(f"ERROR: no {must_have} actions found", file=sys.stderr)
-        return 1
+    for needed in must_have:
+        if needed not in idents:
+            print(f"ERROR: no {needed} actions found", file=sys.stderr)
+            return 1
     for banned in must_not_have:
         if banned in idents:
             print(f"ERROR: unexpected {banned} actions in {key}", file=sys.stderr)
-            return 1
-
-    # The wrapper must call Hevy Stats by its installed name.
-    if key == "hevy-record-metrics":
-        found = False
-        for a in plist["WFWorkflowActions"]:
-            if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.runworkflow":
-                p = a.get("WFWorkflowActionParameters", {})
-                name_param = p.get("WFWorkflowName", {})
-                # The name is passed via the hevyStatsName variable ("Hevy Stats").
-                var = (name_param.get("Value", {}) or {}).get("attachmentsByRange", {})
-                for _rng, att in var.items():
-                    if att.get("VariableName") == "hevyStatsName":
-                        found = True
-        if not found:
-            print("ERROR: wrapper has no Run Shortcut action targeting hevyStatsName",
-                  file=sys.stderr)
             return 1
 
     out_path = OUT_DIR / dist_name
@@ -174,8 +185,8 @@ def main() -> int:
             return 1
     rc = 0
     for key in targets:
-        src_name, wf_name, dist_name, must_have, must_not_have = SHORTCUTS[key]
-        if build_one(key, src_name, wf_name, dist_name, must_have, must_not_have) != 0:
+        wf_name, dist_name, must_have, must_not_have = SHORTCUTS[key]
+        if build_one(key, wf_name, dist_name, must_have, must_not_have) != 0:
             rc = 1
     return rc
 

@@ -1,0 +1,120 @@
+// ============================================================================
+// Function: buildRecordMetrics()
+//   in:  resultJson, outputFormat
+//   out: finalResult (the stats Dictionary),
+//        records (List of RecordMetric Dictionaries; only built when
+//          outputFormat != "stats"),
+//        displayJson (the records as JSON text, for show())
+//
+// Each record is built as its own JSON object and parsed with
+// getDictionary, so Set Value is a REAL number and Increment/Decrement/
+// Reset are REAL booleans (setValue() only stores text). Records are
+// appended to a real List with listAdd (Add to Variable).
+//
+// Record order: muscle groups, exercises, then routine totals.
+// A handled _error in the stats is impossible here (errFlag gate); the
+// error path lives in 60-output.
+
+if @errFlag == 0 {
+    @finalResult = getDictionary(@resultJson)
+}
+
+if @errFlag == 0 {
+    if @outputFormat != "stats" {
+        @rnVal = getValue(@finalResult, "routineName")
+        @routineName = "{@rnVal}"
+        @wsDict = getValue(@finalResult, "workingSetsPerMuscleGroup")
+        @volExDict = getValue(@finalResult, "volumeKgPerExercise")
+        @volMuscleDict = getValue(@finalResult, "volumeKgPerMuscleGroup")
+        @rmDict = getValue(@finalResult, "oneRepMaxKgPerExercise")
+        @rWsVal = getValue(@finalResult, "routineWorkingSets")
+        @rVolVal = getValue(@finalResult, "routineVolumeKg")
+        @rDurVal = getValue(@finalResult, "routineDurationMinutes")
+
+        @records = list()
+        @displayJson = "["
+        @displaySep = ""
+
+        // Per muscle group: working sets + volume.
+        @muscleKeys = dictKeys(@wsDict)
+        for m in @muscleKeys {
+            @safeM = replaceText("\\", "\\\\", @m)
+            @safeM = replaceText("\"", "\\\"", @safeM)
+            @wsVal = dictVal(@wsDict, @m)
+            @wsTxt = "{@wsVal}"
+            if @wsTxt != @empty {
+                @recJson = "{@ob}\"Form Name\": \"Hevy - Muscle Group\", \"Metric Name\": \"{@safeM} working sets\", \"Set Value\": {@wsTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+                @rec = getDictionary(@recJson)
+                listAdd(@rec, "records")
+                @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+                @displaySep = ", "
+            }
+            @volVal = dictVal(@volMuscleDict, @m)
+            @volTxt = "{@volVal}"
+            if @volTxt != @empty {
+                @recJson = "{@ob}\"Form Name\": \"Hevy - Muscle Group\", \"Metric Name\": \"{@safeM} volume\", \"Set Value\": {@volTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+                @rec = getDictionary(@recJson)
+                listAdd(@rec, "records")
+                @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+                @displaySep = ", "
+            }
+        }
+
+        // Per exercise: volume + 1RM.
+        @exKeys = dictKeys(@volExDict)
+        for t in @exKeys {
+            @safeT = replaceText("\\", "\\\\", @t)
+            @safeT = replaceText("\"", "\\\"", @safeT)
+            @volVal = dictVal(@volExDict, @t)
+            @volTxt = "{@volVal}"
+            if @volTxt != @empty {
+                @recJson = "{@ob}\"Form Name\": \"Hevy - Exercise\", \"Metric Name\": \"{@safeT} volume\", \"Set Value\": {@volTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+                @rec = getDictionary(@recJson)
+                listAdd(@rec, "records")
+                @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+                @displaySep = ", "
+            }
+            @rmVal = dictVal(@rmDict, @t)
+            @rmTxt = "{@rmVal}"
+            if @rmTxt != @empty {
+                @recJson = "{@ob}\"Form Name\": \"Hevy - Exercise\", \"Metric Name\": \"{@safeT} 1RM\", \"Set Value\": {@rmTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+                @rec = getDictionary(@recJson)
+                listAdd(@rec, "records")
+                @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+                @displaySep = ", "
+            }
+        }
+
+        // Routine totals: working sets, volume, duration (when known).
+        @safeR = replaceText("\\", "\\\\", @routineName)
+        @safeR = replaceText("\"", "\\\"", @safeR)
+        @rWsTxt = "{@rWsVal}"
+        if @rWsTxt != @empty {
+            @recJson = "{@ob}\"Form Name\": \"Hevy - Routine\", \"Metric Name\": \"{@safeR} working sets\", \"Set Value\": {@rWsTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+            @rec = getDictionary(@recJson)
+            listAdd(@rec, "records")
+            @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+            @displaySep = ", "
+        }
+        @rVolTxt = "{@rVolVal}"
+        if @rVolTxt != @empty {
+            @recJson = "{@ob}\"Form Name\": \"Hevy - Routine\", \"Metric Name\": \"{@safeR} volume\", \"Set Value\": {@rVolTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+            @rec = getDictionary(@recJson)
+            listAdd(@rec, "records")
+            @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+            @displaySep = ", "
+        }
+        @rDurTxt = "{@rDurVal}"
+        if @rDurTxt != @empty {
+            if @rDurTxt != "null" {
+                @recJson = "{@ob}\"Form Name\": \"Hevy - Routine\", \"Metric Name\": \"{@safeR} duration\", \"Set Value\": {@rDurTxt}, \"Increment\": false, \"Decrement\": false, \"Reset\": false, \"Increment Amount\": \"\"{@cb}"
+                @rec = getDictionary(@recJson)
+                listAdd(@rec, "records")
+                @displayJson = "{@displayJson}{@displaySep}{@recJson}"
+                @displaySep = ", "
+            }
+        }
+
+        @displayJson = "{@displayJson}]"
+    }
+}

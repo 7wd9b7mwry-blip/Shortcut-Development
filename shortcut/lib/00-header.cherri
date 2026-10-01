@@ -1,0 +1,152 @@
+// ============================================================================
+// Hevy Stats — part 00: header.
+//
+// Single-shortcut build. The .cherri source is split into lib/ parts (this
+// file plus 10-input, 20-routine, 30-bodyweight, 40-analysis, 50-records,
+// 60-output); build.py concatenates them in filename order and compiles the
+// result. Cherri has no #include for code and Shortcuts has no subroutines,
+// so each part is a "function" by convention: a clearly delimited section
+// with a documented contract (inputs it reads, outputs it sets). The
+// compiled shortcut is one linear action list; the part boundaries below
+// are where you cut if you ever need a real callable unit.
+//
+// Function map:
+//   parseInput()         in: ShortcutInput
+//                        out: apiKey, bodyWeightTxt, outputFormat
+//   fetchRoutine()       in: apiKey
+//                        out: routineDict, routineName  (errFlag on failure)
+//   resolveBodyWeight()  in: apiKey, bodyWeightTxt
+//                        out: bodyWeightNum            (0 = unknown)
+//   analyzeExercises()   in: apiKey, routineDict, bodyWeightNum, routineName
+//                        out: resultJson               (stats as JSON text;
+//                              errFlag on failure)
+//   buildRecordMetrics() in: resultJson
+//                        out: finalResult (stats Dictionary),
+//                             records (List of RecordMetric Dictionaries),
+//                             displayJson (records as JSON text, for show())
+//   emitOutput()         in: errFlag, errMsg/errDetail/errStage,
+//                            outputFormat, finalResult, records, displayJson,
+//                            resultJson
+//                        out: @out — the shortcut's result (ALWAYS the last
+//                          action). One of:
+//                          - List of RecordMetric Dictionaries
+//                            (output_format "record_metrics", the default)
+//                          - the stats Dictionary
+//                            (output_format "stats")
+//                          - {"_error", "_context"} on handled failure
+//
+// Input: Shortcut Input is either your Hevy API key as plain text, or a
+//        JSON dictionary / Dictionary {
+//          "api_key": "...", "body_weight_kg": 70, "output_format": "..."
+//        }.
+//        body_weight_kg is optional; when absent the latest Hevy body
+//        measurement is used, else bodyweight sets get no weight metrics.
+//        output_format is optional: "record_metrics" (default) or "stats".
+//
+// RecordMetric dictionaries have the shape of the "Record Metrics" form
+// (see docs/RECORD_METRIC.md):
+//   {"Form Name": "Hevy - Muscle Group" | "Hevy - Exercise" | "Hevy - Routine",
+//    "Metric Name": "<subject> <metric>",
+//    "Set Value": <number>, "Increment": false, "Decrement": false,
+//    "Reset": false, "Increment Amount": ""}
+// Records produced: per muscle group "<muscle> working sets" + "<muscle>
+// volume"; per exercise "<exercise> volume" + "<exercise> 1RM"; routine
+// "<routine> working sets" + "<routine> volume" + "<routine> duration"
+// (duration skipped when unknown).
+//
+// Stats mirror src/hevy-stats.js (kept as the tested spec):
+//   - working sets: routine sets whose type is normal/failure/dropset
+//     (warmup excluded), grouped by the exercise's primary muscle group
+//     ("other" when the template lookup misses).
+//   - effective weight per history set: logged weight_kg when > 0, else the
+//     body weight for bodyweight sets (weight_kg null/0) when known.
+//   - 1RM: best Epley estimate (weight*(1+reps/30), true singles use the
+//     weight itself) over qualifying history sets, rounded to 0.1 kg.
+//     Exercises without a qualifying set are omitted.
+//   - volume: sum of effective-weight x reps over the same qualifying sets
+//     from the fetched history, per exercise and per muscle group,
+//     rounded to 0.1 kg. Exercises with no volume are omitted.
+//   - qualifying set: type normal/failure/dropset (warmup excluded),
+//     effective weight > 0, reps 1..30.
+//   - routineWorkingSets: total working sets prescribed in the routine
+//     (every occurrence counts, same population as the per-muscle map).
+//   - routineVolumeKg: sum of the rounded per-exercise volumes.
+//   - routineDurationMinutes: minutes between start and end of the history
+//     workout with the max workout_start_time whose workout_title matches
+//     the routine title; null when none has both timestamps.
+//   - body weight precedence: explicit body_weight_kg input > latest Hevy
+//     body measurement with a weight > 0 > unknown.
+//   - the first routine returned by the API is treated as most recently
+//     updated.
+//
+// IMPORTANT: bare truthiness checks (`if @x` / `if !@x`) are NOT used
+// anywhere here. Device testing (Sep 30, 2026) showed they misbehave.
+// All emptiness checks use explicit `== @empty` / `!= @empty` comparisons
+// and the error state uses a numeric flag.
+//
+// CHERRI GOTCHAS (each cost a device-test round trip):
+//   - `@dict['key']` SILENTLY compiles to a plain variable copy, dropping
+//     the key lookup. ALWAYS use getValue(@dict, "key").
+//   - A double-quoted lone "{" or "}" (e.g. `@ob = "{"`) SILENTLY compiles
+//     to empty text (the brace is read as an interpolation start).
+//     Literal braces MUST be single-quoted: '{' / '}'. build.py fails the
+//     build if a part contains the broken pattern.
+//   - A custom `action` declaration MUST have a `: <type> {` body (even
+//     empty); a bodyless declaration breaks `{@var}` parsing below it.
+//
+// NOTE: Get Contents of URL halts the shortcut with a system error on HTTP
+// or network failures (e.g. a wrong API key -> 401); Shortcuts offers no
+// try/catch for that. Everything else is handled below.
+
+#define name Hevy Stats
+
+#include 'actions/web'
+#include 'actions/text'
+#include 'actions/math'
+#include 'actions/calendar'
+
+// Raw Shortcuts action: Get Time Between Dates
+// (is.workflow.actions.gettimebetweendates). Cherri 2.3.0 has no built-in
+// for it; the schema below is verified against Apple's action definition
+// (WFInput = second date, WFTimeUntilFromDate = first date, output =
+// WFInput - WFTimeUntilFromDate) and against Daniel's own Stopwatch
+// shortcut, which uses the same action. Unit is pinned to Minutes
+// explicitly (the action default) rather than relied upon.
+action 'is.workflow.actions.gettimebetweendates' timeBetweenDates(variable from: 'WFTimeUntilFromDate', variable to: 'WFInput'): number {
+    "WFTimeUntilUnit": "Minutes"
+}
+
+// Get Value for Key with a VARIABLE key on a variable-typed dictionary.
+// Same underlying action Cherri's getValue() emits
+// (is.workflow.actions.getvalueforkey); declared raw because Cherri's
+// type checker only accepts getValue() on dictionary-typed variables,
+// while sub-dictionaries pulled out of another dictionary arrive untyped.
+action 'is.workflow.actions.getvalueforkey' dictVal(variable dict: 'WFInput', text key: 'WFDictionaryKey'): variable {
+    "WFGetDictionaryValueType": "Value"
+}
+
+// Get Keys from Dictionary on a variable-typed dictionary. Same underlying
+// action Cherri's getKeys() emits (is.workflow.actions.getvalueforkey with
+// "All Keys"); declared raw for the same type-checker reason as dictVal.
+action 'is.workflow.actions.getvalueforkey' dictKeys(variable dict: 'WFInput'): array {
+    "WFGetDictionaryValueType": "All Keys"
+}
+
+// Add to Variable (is.workflow.actions.appendvariable): appends the input
+// to the named variable's list. The list is created up front with list().
+action 'is.workflow.actions.appendvariable' listAdd(variable item: 'WFInput', text varName: 'WFVariableName'): variable {
+}
+
+// --- Shared state ----------------------------------------------------------
+// Empty-text sentinel: Cherri only allows == / != between two variables.
+@empty = ""
+// Literal braces for hand-built JSON (single-quoted = raw, no interpolation).
+@ob = '{'
+@cb = '}'
+// Working-set types, comma-padded so `contains` matches whole types only.
+@okTypes = ",normal,failure,dropset,"
+// Numeric error flag (0 = ok, 1 = error). Never tested with truthiness.
+@errFlag = 0
+@errMsg = ""
+@errDetail = ""
+@errStage = ""

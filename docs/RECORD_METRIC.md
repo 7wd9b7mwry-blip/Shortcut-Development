@@ -28,19 +28,18 @@ Example:
 ```
 
 Types matter: `Set Value` must be a real Number and the flags real
-Booleans, not their text equivalents. The wrapper
-(`shortcut/hevy-record-metrics.cherri`) builds the records as JSON text
-and parses them with Get Dictionary from Input so the types survive —
-Cherri's `setValue()` only stores text.
+Booleans, not their text equivalents. `Hevy Stats`
+(`shortcut/lib/50-records.cherri`) builds each record as its own JSON
+object and parses it with Get Dictionary from Input so the types
+survive — Cherri's `setValue()` only stores text. Records are appended
+to a real List with Add to Variable.
 
-## Hevy Record Metrics
+## Hevy Stats output
 
-`Hevy Record Metrics` (source: `shortcut/hevy-record-metrics.cherri`)
-runs the **Hevy Stats** shortcut — passing Shortcut Input through
-unchanged — and returns a **List** of `RecordMetric` dictionaries, one
-per metric Hevy Stats reported:
+`Hevy Stats` returns a **List** of `RecordMetric` dictionaries by
+default, one per metric:
 
-| Form Name          | Metric Name                | Set Value from Hevy Stats key      |
+| Form Name          | Metric Name                | Set Value from stats key           |
 |--------------------|----------------------------|------------------------------------|
 | Hevy - Muscle Group| `<muscle> working sets`    | `workingSetsPerMuscleGroup[muscle]`|
 | Hevy - Muscle Group| `<muscle> volume`          | `volumeKgPerMuscleGroup[muscle]`   |
@@ -52,17 +51,33 @@ per metric Hevy Stats reported:
 
 Notes:
 
-- The `<routine> duration` record is emitted only when Hevy Stats
-  reports a duration (it is `null` when no matching workout has both
-  timestamps). All other records are emitted whenever their source
-  value exists.
+- The `<routine> duration` record is emitted only when a duration is
+  known (it is `null` when no matching workout has both timestamps).
+  All other records are emitted whenever their source value exists.
 - Names with `"` or `\` are JSON-escaped before the records are built.
-- If Hevy Stats returns a handled error (`{"_error", "_context"}`),
-  the wrapper returns that dictionary unchanged — it never fabricates
-  metric records from an error.
-- The wrapper calls Hevy Stats with Run Shortcut by its installed
-  name, **Hevy Stats**. Both shortcuts must be installed; renaming
-  Hevy Stats on the iPhone requires updating `@hevyStatsName` in the
-  wrapper source and rebuilding.
-- Hevy Stats' last action is always its result/error dictionary, so
-  Run Shortcut deterministically receives a Dictionary.
+- Record order: muscle groups, exercises, then routine totals.
+- On a handled error the shortcut returns `{"_error", "_context"}`
+  unchanged — it never fabricates metric records from an error.
+
+## Raw stats output
+
+Pass `"output_format": "stats"` in the input dictionary
+(`{"api_key": "...", "output_format": "stats"}`) to get the raw stats
+dictionary instead of the RecordMetric list:
+
+```json
+{
+  "routineName": "Sample",
+  "workingSetsPerMuscleGroup": {"chest": 3},
+  "volumeKgPerExercise": {"Bench Press (Barbell)": 1646.5},
+  "volumeKgPerMuscleGroup": {"chest": 1646.5},
+  "oneRepMaxKgPerExercise": {"Bench Press (Barbell)": 69.9},
+  "bodyWeightKgUsed": null,
+  "routineWorkingSets": 6,
+  "routineVolumeKg": 1646.5,
+  "routineDurationMinutes": 0.3
+}
+```
+
+This is the same dictionary the RecordMetric list is built from, and is
+useful when composing Hevy Stats with other shortcuts via Run Shortcut.
