@@ -8,8 +8,17 @@ An Apple Shortcut that analyzes your Hevy workout data and returns a dictionary 
 - **`volumeKgPerMuscleGroup`** — total working volume (kg) per muscle group
 - **`oneRepMaxKgPerExercise`** — estimated 1RM (kg) per exercise, from your Hevy history
 - **`bodyWeightKgUsed`** — the body weight used for bodyweight sets, or `null` when unknown
+- **`routineWorkingSets`** — total working sets in the routine (all exercises, warmups excluded)
+- **`routineVolumeKg`** — total working volume (kg) across the routine
+- **`routineDurationMinutes`** — duration (minutes, 0.1) of the latest history workout matching the routine name, or `null` when no matching workout has both timestamps
 
 Every run returns either that dictionary or a detailed error dictionary (`{"_error": ..., "_context": {...}}`); error branches also show a notification. There are no silent failures.
+
+## Hevy Record Metrics
+
+A second shortcut, **Hevy Record Metrics**, runs Hevy Stats (input passed through unchanged) and returns a **list of `RecordMetric` dictionaries** — the shape the Record Metrics form expects (`Form Name`, `Metric Name`, `Set Value` as a real number, `Increment`/`Decrement`/`Reset` as real booleans = `false`, `Increment Amount` = `""`). One record per reported metric, across the `Hevy - Muscle Group`, `Hevy - Exercise`, and `Hevy - Routine` forms; the `<routine> duration` record is skipped when no duration is known. If Hevy Stats returns a handled error, it is passed through unchanged — no records are fabricated. See [docs/RECORD_METRIC.md](docs/RECORD_METRIC.md).
+
+Both shortcuts must be installed (Hevy Record Metrics calls Hevy Stats by name). Input contract is identical to Hevy Stats.
 
 ## Input
 
@@ -57,20 +66,26 @@ test/run-tests.js              Node test harness for the JS spec
 test/native-sim.js             Node simulation of the Cherri logic, same fixtures
 test/real-fixtures-check.js    Regression check against real API responses
                                (local-fixtures/, never committed)
+test/record-metrics-sim.js     Node simulation of the Record Metrics wrapper
 test/fixtures/                 Hevy-shaped test data
 shortcut/hevy-stats.cherri     Cherri source (native actions)
+shortcut/hevy-record-metrics.cherri  Cherri source for the RecordMetric wrapper
 build/build.py                 Build script: compiles, post-processes, sanity-checks
 dist/HevyStats.shortcut        Compiled shortcut (unsigned)
 dist/HevyStats_signed.shortcut Compiled shortcut (signed via RoutineHub HubSign)
+dist/HevyRecordMetrics.shortcut        Compiled wrapper (unsigned)
+dist/HevyRecordMetrics_signed.shortcut Compiled wrapper (signed via RoutineHub HubSign)
+docs/RECORD_METRIC.md          The RecordMetric dictionary type + wrapper contract
 ```
 
 ## Building and testing
 
 ```bash
-node test/run-tests.js          # JS spec tests
-node test/native-sim.js         # native-logic simulation tests
-node test/real-fixtures-check.js # real-response regression (needs local-fixtures/)
-cherri shortcut/hevy-stats.cherri --skip-sign -o /tmp/out.shortcut   # compile only
+node test/run-tests.js             # JS spec tests
+node test/native-sim.js            # native-logic simulation tests
+node test/record-metrics-sim.js    # Record Metrics wrapper tests
+node test/real-fixtures-check.js   # real-response regression (needs local-fixtures/)
+python3 build/build.py             # compile + audit both shortcuts
 ```
 
 To sign: `cherri shortcut/hevy-stats.cherri --hubsign --output=dist/HevyStats_signed.shortcut` (RoutineHub HubSign service).

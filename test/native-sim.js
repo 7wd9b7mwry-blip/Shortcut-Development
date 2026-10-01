@@ -154,6 +154,10 @@ function runNative(input, api) {
   var volExParts = [];
   var volDict = {};
   var volMuscleOrder = [];
+  var totalWs = 0;
+  var totalVol = 0;
+  var latestStart = "";
+  var latestEnd = "";
   if (errFlag === 0) {
     var exercises = routine["exercises"] || [];
     if (!Array.isArray(exercises)) exercises = [];
@@ -190,6 +194,8 @@ function runNative(input, api) {
         curNum = toNumber(String(curVal)); // text round-trip
       }
       wsDict[muscle] = curNum + wsCount; // setValue stores text
+      // Routine total: every occurrence counts, like the per-muscle map.
+      totalWs = totalWs + wsCount;
 
       // History: fetched once per template id (deduplicated).
       var dup = false;
@@ -209,6 +215,23 @@ function runNative(input, api) {
         if (!Array.isArray(entries)) entries = [];
         entries.forEach(function (e) {
           var hType = txt(e.set_type);
+          // Latest-workout tracking (date comparison; bad timestamps skip).
+          var wt = txt(e.workout_title);
+          var wStart = txt(e.workout_start_time);
+          var wEnd = txt(e.workout_end_time);
+          if (wt === routineName && wStart !== "" && wEnd !== "") {
+            if (latestStart === "") {
+              latestStart = wStart;
+              latestEnd = wEnd;
+            } else {
+              var dWS = new Date(wStart).getTime();
+              var dLatest = new Date(latestStart).getTime();
+              if (!isNaN(dWS) && dWS > dLatest) {
+                latestStart = wStart;
+                latestEnd = wEnd;
+              }
+            }
+          }
           if (OK_TYPES.indexOf("," + hType + ",") < 0) return;
           // Mirrors the template: number() only on non-empty text.
           var wTxt = txt(e.weight_kg);
@@ -239,6 +262,8 @@ function runNative(input, api) {
       if (vol > 0) {
         var volR = Math.round(vol * 10) / 10;
         volExParts.push('"' + esc(title) + '": ' + volR);
+        // Routine total: sum of rounded per-exercise volumes.
+        totalVol = Math.round((totalVol + volR) * 10) / 10;
         var curVol = volDict[muscle];
         if (curVol === undefined || curVol === "") {
           volDict[muscle] = 0;
@@ -260,13 +285,27 @@ function runNative(input, api) {
     })
     .join(", ");
 
+  // Routine duration: minutes between the latest workout's start and end.
+  // Null when no title-matching workout had both timestamps, or the span
+  // is negative/bad (mirrors the template's Get Time Between Dates).
+  var durMinJson = "null";
+  if (latestStart !== "") {
+    var durMin = (new Date(latestEnd).getTime() - new Date(latestStart).getTime()) / 60000;
+    if (!isNaN(durMin) && durMin >= 0) {
+      durMinJson = String(Math.round(durMin * 10) / 10);
+    }
+  }
+
   var bwJsonVal = bodyWeightNum > 0 ? String(bodyWeightNum) : "null";
   var resultJson =
     '{"routineName": "' + esc(routineName) + '", "workingSetsPerMuscleGroup": {' +
     wsEntries + '}, "volumeKgPerExercise": {' + volExParts.join(", ") +
     '}, "volumeKgPerMuscleGroup": {' + volMuscleEntries +
     '}, "oneRepMaxKgPerExercise": {' + rmJsonParts.join(", ") +
-    '}, "bodyWeightKgUsed": ' + bwJsonVal + "}";
+    '}, "bodyWeightKgUsed": ' + bwJsonVal +
+    ', "routineWorkingSets": ' + totalWs +
+    ', "routineVolumeKg": ' + totalVol +
+    ', "routineDurationMinutes": ' + durMinJson + "}";
 
   var errJson =
     '{"_error": "' + esc(errMsg) + '", "_context": {"stage": "' + errStage +
@@ -313,6 +352,32 @@ function happyApi() {
   };
 }
 
+// History entries with workout title/timestamps injected (the file
+// fixtures carry none). Bench = older Push Day workout, OHP = latest Push
+// Day workout (47.3 min), tri = oldest, missing = newer but wrong title.
+function apiWithWorkouts() {
+  var api = happyApi();
+  function withW(name, title, start, end) {
+    var d = load(name);
+    d.exercise_history.forEach(function (e) {
+      e.workout_title = title;
+      e.workout_start_time = start;
+      e.workout_end_time = end;
+    });
+    return JSON.stringify(d);
+  }
+  api.history["tpl-bench"] = withW("api-history-bench.json", "Push Day",
+    "2026-09-28T08:00:00+00:00", "2026-09-28T09:02:30+00:00");
+  api.history["tpl-ohp"] = withW("api-history-ohp.json", "Push Day",
+    "2026-09-30T18:00:00+00:00", "2026-09-30T18:47:18+00:00");
+  api.history["tpl-tri"] = withW("api-history-tri.json", "Push Day",
+    "2026-09-27T07:30:00+00:00", "2026-09-27T08:10:00+00:00");
+  api.history["tpl-missing"] = withW("api-history-missing.json", "Other Routine",
+    "2026-10-01T08:00:00+00:00", "2026-10-01T09:00:00+00:00");
+  return api;
+}
+
+// ---------- tests ----------
 var EXPECTED = {
   routineName: "Push Day",
   workingSetsPerMuscleGroup: { chest: 5, shoulders: 3, triceps: 2, other: 2 },
@@ -330,6 +395,9 @@ var EXPECTED = {
     "Mystery Machine": 93.3,
   },
   bodyWeightKgUsed: null,
+  routineWorkingSets: 12,
+  routineVolumeKg: 2552.5,
+  routineDurationMinutes: null,
 };
 
 var failures = 0;
@@ -344,7 +412,6 @@ function check(name, fn) {
   }
 }
 
-// ---------- tests ----------
 check("happy path: no error", function () {
   var r = runNative("KEY", happyApi());
   assert.strictEqual(r.errFlag, 0);
@@ -379,6 +446,41 @@ check("happy path: volumeKgPerMuscleGroup", function () {
 });
 check("happy path: bodyWeightKgUsed null when unknown", function () {
   assert.strictEqual(runNative("KEY", happyApi()).result.bodyWeightKgUsed, null);
+});
+check("happy path: routineWorkingSets", function () {
+  assert.strictEqual(runNative("KEY", happyApi()).result.routineWorkingSets, EXPECTED.routineWorkingSets);
+});
+check("happy path: routineVolumeKg", function () {
+  assert.strictEqual(runNative("KEY", happyApi()).result.routineVolumeKg, EXPECTED.routineVolumeKg);
+});
+check("happy path: routineDurationMinutes null without workout fields", function () {
+  // The file fixtures carry no workout_title/timestamps.
+  assert.strictEqual(runNative("KEY", happyApi()).result.routineDurationMinutes, null);
+});
+check("duration: latest matching workout wins", function () {
+  var r = runNative("KEY", apiWithWorkouts());
+  assert.strictEqual(r.errFlag, 0);
+  // OHP's Push Day workout starts last: 18:00 -> 18:47:18 = 47.3 min.
+  assert.strictEqual(r.result.routineDurationMinutes, 47.3);
+  assert.strictEqual(r.result.routineWorkingSets, 12);
+  assert.strictEqual(r.result.routineVolumeKg, 2552.5);
+});
+check("duration: other routine titles ignored", function () {
+  var api = apiWithWorkouts();
+  // "Other Routine" is newer than any Push Day workout but must not win.
+  var r = runNative("KEY", api);
+  assert.strictEqual(r.result.routineDurationMinutes, 47.3);
+});
+check("duration: end before start -> null", function () {
+  var api = happyApi();
+  var d = load("api-history-bench.json");
+  d.exercise_history.forEach(function (e) {
+    e.workout_title = "Push Day";
+    e.workout_start_time = "2026-09-30T19:00:00+00:00";
+    e.workout_end_time = "2026-09-30T18:00:00+00:00";
+  });
+  api.history["tpl-bench"] = JSON.stringify(d);
+  assert.strictEqual(runNative("KEY", api).result.routineDurationMinutes, null);
 });
 check("happy path: chest working sets include dup exercise", function () {
   // tpl-bench appears twice (4 + 1 working sets) -> chest == 5

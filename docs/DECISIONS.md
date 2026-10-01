@@ -251,3 +251,64 @@ unsigned build: zero 100/101 conditions, no HTML/JS/Ask, 4 downloadURL
 AEA1 signature on the signed artifact. real-fixtures-check: Daniel's
 data -> bench volume 1646.5 kg; with body_weight_kg 70, Pull Up gains
 1RM 98 and volume 2310. Re-signed, re-pushed, re-delivered.
+
+## Record Metrics wrapper + routine aggregates (Oct 1, 2026)
+
+- New Hevy Stats output keys: `routineWorkingSets` (total qualifying
+  prescribed sets across every exercise occurrence, warmups excluded),
+  `routineVolumeKg` (sum of rounded per-exercise history volumes, 0.1 kg),
+  `routineDurationMinutes` (latest history workout whose `workout_title`
+  exactly matches the routine name, end-minus-start in minutes to 0.1;
+  `null` when no matching workout has both timestamps or the duration is
+  negative/invalid). History stays page 1 / pageSize 100, so routine
+  volume is "from fetched history", not guaranteed lifetime volume.
+- Latest workout is chosen by parsed dates (`Date.parse`), not timestamp
+  string comparison, so mixed ISO offsets order correctly. In Cherri,
+  timestamps are converted with `date()` and compared as dates because
+  Cherri rejects `>` on text; duration uses a raw custom action for
+  `is.workflow.actions.gettimebetweendates` (WFTimeUntilUnit Minutes),
+  mirroring the pattern of bypassing the checker only when the emitted
+  action is byte-identical to a supported one.
+- `Hevy Record Metrics` (`shortcut/hevy-record-metrics.cherri`) runs
+  Hevy Stats with the input passed through UNCHANGED and returns a List
+  of RecordMetric dictionaries (docs/RECORD_METRIC.md). Metric names:
+  `<muscle> working sets`, `<muscle> volume`, `<exercise> volume`,
+  `<exercise> 1RM`, `<routine> working sets`, `<routine> volume`,
+  `<routine> duration`; forms `Hevy - Muscle Group`, `Hevy - Exercise`,
+  `Hevy - Routine`; Increment/Decrement/Reset are real booleans `false`,
+  Set Value a real number. Handled `_error` results pass through
+  unchanged — the wrapper never fabricates records from an error.
+- Hevy Stats' tail was reordered so its LAST action is the result/error
+  dictionary assignment (previously a no-op If trailed it), making the
+  Run Shortcut return value deterministic.
+
+Cherri gotchas hit while building the wrapper:
+- `@dict['key']` with a constant key SILENTLY compiles to a plain
+  variable copy — the lookup vanishes. Verified in the plist: no
+  getvalueforkey action is emitted. Never use it.
+- `getValue()`/`getKeys()` reject variable-typed dictionaries (e.g.
+  sub-dicts pulled out of another dict). Workaround: raw custom actions
+  for `is.workflow.actions.getvalueforkey` — one with
+  `WFGetDictionaryValueType: Value` + variable `WFDictionaryKey`, one
+  with `WFGetDictionaryValueType: "All Keys"` — emitting exactly what
+  the built-ins emit.
+- `for k in @dict` dict-iteration semantics were left unverified; the
+  wrapper instead uses the "All Keys" lookup (a real list) and iterates
+  that — list iteration is the proven pattern.
+- Dictionary literals (`@d = {"a": 1}`) are parsed as STRICT JSON before
+  interpolation: `false`/numbers work as literals, but `{@var}` values
+  fail. The wrapper therefore builds records as JSON text and parses
+  with getDictionary, which preserves real numbers/booleans.
+- The wrapper calls Hevy Stats by installed name via a variable
+  (`@hevyStatsName = "Hevy Stats"`); build.py audits that the
+  runworkflow action targets it. A name mismatch ("HevyStats" vs
+  "Hevy Stats") was caught and fixed before signing.
+- build.py now builds both shortcuts, with per-target audits: no Ask,
+  no HTML/JS, no 100/101 conditions, Hevy Stats must contain
+  downloadurl, the wrapper must contain runworkflow and must NOT
+  contain downloadurl.
+
+646 actions (Hevy Stats), 173 (wrapper). Tests: 69 (run-tests.js),
+35 (native-sim.js), 9 (record-metrics-sim.js), real-fixtures-check
+passed against Daniel's data (Sample: 6 working sets, 1646.5 kg,
+0.3 min). Signed artifacts pending device runs.

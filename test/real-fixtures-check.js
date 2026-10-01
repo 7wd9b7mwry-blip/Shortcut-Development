@@ -51,6 +51,10 @@ assert.deepStrictEqual(r.result, {
   volumeKgPerMuscleGroup: { chest: 1646.5 },
   oneRepMaxKgPerExercise: { "Bench Press (Barbell)": 69.9 },
   bodyWeightKgUsed: null,
+  routineWorkingSets: 6,
+  routineVolumeKg: 1646.5,
+  // His Sample history workout: 2026-09-30T02:21:39 -> 02:21:57 = 0.3 min.
+  routineDurationMinutes: 0.3,
   // Pull Up is bodyweight-only in history (weight_kg null) and no body
   // weight is known -> no 1RM and no volume, by design.
 });
@@ -64,6 +68,9 @@ assert.strictEqual(r2.result.oneRepMaxKgPerExercise["Pull Up"], 98);
 assert.strictEqual(r2.result.volumeKgPerExercise["Pull Up"], 2310);
 assert.strictEqual(r2.result.volumeKgPerMuscleGroup.lats, 2310);
 assert.strictEqual(r2.result.bodyWeightKgUsed, 70);
+assert.strictEqual(r2.result.routineWorkingSets, 6);
+assert.strictEqual(r2.result.routineVolumeKg, 3956.5);
+assert.strictEqual(r2.result.routineDurationMinutes, 0.3);
 console.log("real-fixtures body-weight check passed:", JSON.stringify({
   pullUp1RM: r2.result.oneRepMaxKgPerExercise["Pull Up"],
   pullUpVolume: r2.result.volumeKgPerExercise["Pull Up"],

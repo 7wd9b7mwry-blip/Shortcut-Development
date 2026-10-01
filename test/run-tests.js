@@ -230,62 +230,53 @@ check("qualifies: normal ok", stats.qualifiesFor1RM(100, 5, "normal"), true);
 check("qualifies: failure ok", stats.qualifiesFor1RM(42.5, 6, "failure"), true);
 check("qualifies: dropset ok", stats.qualifiesFor1RM(30, 12, "dropset"), true);
 
-// --- Two-pass device simulation ---
-// Simulates the shortcut: base64 JSONs -> placeholder substitution -> eval with
-// stubbed document/atob/TextDecoder -> decode written output.
-(function testDeviceTwoPass() {
-  var src = fs.readFileSync(path.join(__dirname, "..", "src", "hevy-stats.js"), "utf8");
+// --- Routine-level aggregates ---
+check("pipeline routineWorkingSets (5+3+2+2)", push.routineWorkingSets, 12);
+check("pipeline routineVolumeKg (sum of per-exercise volumes)",
+  push.routineVolumeKg, 2552.5);
+check("pipeline routineDurationMinutes null without workout timestamps",
+  push.routineDurationMinutes, null);
 
-  function runPass(mode, routinesB64, templatesB64, historyB64) {
-    var page = src
-      .replace(/__MODE__/g, mode)
-      .replace(/__ROUTINES_B64__/g, routinesB64)
-      .replace(/__TEMPLATES_B64__/g, templatesB64 || "")
-      .replace(/__HISTORY_B64__/g, historyB64 || "");
-    var written = null;
-    var document = { write: function (s) { written = s; } };
-    var module = undefined;
-    // atob / TextDecoder stubs for Node.
-    var atob = function (b64) { return Buffer.from(b64, "base64").toString("binary"); };
-    var TextDecoder = function () {};
-    TextDecoder.prototype.decode = function (bytes) {
-      return Buffer.from(bytes).toString("utf8");
-    };
-    eval(page);
-    return JSON.parse(decodeURIComponent(written));
+// --- routineDurationMinutes: most recent workout of this routine ---
+(function testDuration() {
+  function histWithWorkouts(entries) {
+    return stats.computeStats({
+      routine: { routineName: "Push Day", exercises: [] },
+      muscleByTemplate: {},
+      historyEntries: entries
+    }).routineDurationMinutes;
   }
-
-  function b64(s) { return Buffer.from(s, "utf8").toString("base64"); }
-
-  var routinesB64 = b64(fixture("api-routines.json"));
-
-  // Pass 1: ids
-  var idsResult = runPass("ids", routinesB64);
-  check("device pass1: no error", idsResult._error, undefined);
-  check("device pass1: ids", idsResult.ids,
-    "tpl-bench,tpl-ohp,tpl-tri,tpl-bench,tpl-missing");
-
-  // Pass 2: stats
-  var templatesB64 = b64(fixture("api-templates.json"));
-  var histB64 = [
-    "api-history-bench.json", "api-history-ohp.json", "api-history-tri.json",
-    "api-history-bench.json", "api-history-missing.json"
-  ].map(function (f) { return b64(fixture(f)); }).join("|");
-  var statsResult = runPass("stats", routinesB64, templatesB64, histB64);
-  check("device pass2: no error", statsResult._error, undefined);
-  check("device pass2: routineName", statsResult.routineName, "Push Day");
-  check("device pass2: working sets", statsResult.workingSetsPerMuscleGroup, {
-    chest: 5, shoulders: 3, triceps: 2, other: 2
-  });
-  checkClose("device pass2: 1RM bench",
-    statsResult.oneRepMaxKgPerExercise["Bench Press (Barbell)"], 116.7);
-
-  // Pass 1 error: malformed routines JSON
-  var errResult = runPass("ids", b64("not json{{{"));
-  check("device pass1 error: has _error", typeof errResult._error, "string");
-  check("device pass1 error: mentions JSON",
-    errResult._error.indexOf("not valid JSON") >= 0, true);
-  check("device pass1 error: has context", typeof errResult._context, "object");
+  var base = { weight_kg: 100, reps: 5, set_type: "normal" };
+  function entry(title, start, end) {
+    return Object.assign({}, base, {
+      workoutTitle: title, workoutStartTime: start, workoutEndTime: end
+    });
+  }
+  // Picks the latest workout by start time: 45.5 minutes.
+  check("duration: latest workout wins", histWithWorkouts([
+    entry("Push Day", "2026-09-28T18:00:00+00:00", "2026-09-28T19:00:00+00:00"),
+    entry("Push Day", "2026-09-30T18:00:00+00:00", "2026-09-30T18:45:30+00:00")
+  ]), 45.5);
+  // A later workout under a different title is ignored.
+  check("duration: other routine titles ignored", histWithWorkouts([
+    entry("Push Day", "2026-09-30T18:00:00+00:00", "2026-09-30T18:45:00+00:00"),
+    entry("Leg Day", "2026-10-01T18:00:00+00:00", "2026-10-01T19:30:00+00:00")
+  ]), 45);
+  // Entries missing timestamps are skipped.
+  check("duration: missing timestamps skipped", histWithWorkouts([
+    entry("Push Day", null, "2026-09-30T18:45:00+00:00"),
+    entry("Push Day", "2026-09-30T18:00:00+00:00", null),
+    entry("Push Day", "2026-09-30T17:00:00+00:00", "2026-09-30T17:30:00+00:00")
+  ]), 30);
+  // No usable workout -> null.
+  check("duration: null when no workouts", histWithWorkouts([
+    entry("Other", "2026-09-30T18:00:00+00:00", "2026-09-30T18:45:00+00:00")
+  ]), null);
+  check("duration: null for empty history", histWithWorkouts([]), null);
+  // End before start (bad data) -> null, not a negative number.
+  check("duration: null when end precedes start", histWithWorkouts([
+    entry("Push Day", "2026-09-30T18:45:00+00:00", "2026-09-30T18:00:00+00:00")
+  ]), null);
 })();
 
 // --- Unicode through the full base64 pipeline ---

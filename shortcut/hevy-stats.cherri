@@ -8,7 +8,14 @@
 // Output: ALWAYS a dictionary:
 //           {"routineName": ..., "workingSetsPerMuscleGroup": {...},
 //            "volumeKgPerExercise": {...}, "volumeKgPerMuscleGroup": {...},
-//            "oneRepMaxKgPerExercise": {...}, "bodyWeightKgUsed": 70 | null}
+//            "oneRepMaxKgPerExercise": {...}, "bodyWeightKgUsed": 70 | null,
+//            "routineWorkingSets": 12, "routineVolumeKg": 2552.5,
+//            "routineDurationMinutes": 45.5 | null}
+//   routineWorkingSets: total working sets prescribed in the routine.
+//   routineVolumeKg: sum of the rounded per-exercise volumes.
+//   routineDurationMinutes: end-start of the latest history workout whose
+//     workout_title matches the routine title (minutes, 0.1); null when
+//     no such workout has both timestamps.
 // Error branches return a detailed error:
 //           {"_error": ..., "_context": {"stage": ..., "detail": ...}}
 // Error branches also show a notification with the specific message and
@@ -28,6 +35,12 @@
 //     rounded to 0.1 kg. Exercises with no volume are omitted.
 //   - qualifying set: type normal/failure/dropset (warmup excluded),
 //     effective weight > 0, reps 1..30.
+//   - routineWorkingSets: total working sets prescribed in the routine
+//     (every occurrence counts, same population as the per-muscle map).
+//   - routineVolumeKg: sum of the rounded per-exercise volumes.
+//   - routineDurationMinutes: minutes between start and end of the history
+//     workout with the max workout_start_time whose workout_title matches
+//     the routine title; null when none has both timestamps.
 //   - body weight precedence: explicit body_weight_kg input > latest Hevy
 //     body measurement with a weight > 0 > unknown.
 //   - the first routine returned by the API is treated as most recently
@@ -54,6 +67,18 @@
 #include 'actions/web'
 #include 'actions/text'
 #include 'actions/math'
+#include 'actions/calendar'
+
+// Raw Shortcuts action: Get Time Between Dates
+// (is.workflow.actions.gettimebetweendates). Cherri 2.3.0 has no built-in
+// for it; the schema below is verified against Apple's action definition
+// (WFInput = second date, WFTimeUntilFromDate = first date, output =
+// WFInput - WFTimeUntilFromDate) and against Daniel's own Stopwatch
+// shortcut, which uses the same action. Unit is pinned to Minutes
+// explicitly (the action default) rather than relied upon.
+action 'is.workflow.actions.gettimebetweendates' timeBetweenDates(variable from: 'WFTimeUntilFromDate', variable to: 'WFInput'): number {
+    "WFTimeUntilUnit": "Minutes"
+}
 #define name HevyStats
 
 @inputTxt = "{ShortcutInput}"
@@ -217,6 +242,13 @@ if @errFlag == 0 {
     @volMuscleJson = ""
     @volMuscleSep = ""
     @seenTids = "|"
+    @totalWs = 0
+    @totalVol = 0
+    // Latest workout of this routine (for routineDurationMinutes): the
+    // max workout_start_time among history entries whose workout_title
+    // matches the routine title, compared as parsed dates.
+    @latestStart = ""
+    @latestEnd = ""
 
     for ex in @exercises {
         @exDict = getDictionary(@ex)
@@ -263,6 +295,8 @@ if @errFlag == 0 {
         }
         @newCount = @curNum + @wsCount
         @wsDict = setValue(@wsDict, @muscle, "{@newCount}")
+        // Routine total: every occurrence counts, same as the per-muscle map.
+        @totalWs = @totalWs + @wsCount
 
         // Best Epley 1RM from this exercise's history.
         // History is fetched once per template id (deduplicated).
@@ -291,6 +325,35 @@ if @errFlag == 0 {
                         @rTxt = "{@rVal}"
                         @hTypeVal = getValue(@eDict, "set_type")
                         @hType = "{@hTypeVal}"
+                        // Latest-workout tracking for routineDurationMinutes.
+                        // Only entries from a workout titled like this
+                        // routine, with both timestamps present.
+                        @wtVal = getValue(@eDict, "workout_title")
+                        @wt = "{@wtVal}"
+                        @wStartVal = getValue(@eDict, "workout_start_time")
+                        @wStart = "{@wStartVal}"
+                        @wEndVal = getValue(@eDict, "workout_end_time")
+                        @wEnd = "{@wEndVal}"
+                        if @wt == @routineName {
+                            if @wStart != @empty {
+                                if @wEnd != @empty {
+                                    if @latestStart == @empty {
+                                        @latestStart = @wStart
+                                        @latestEnd = @wEnd
+                                    } else {
+                                        // Cherri only allows > on dates, not
+                                        // text; comparing parsed dates is
+                                        // also robust to timestamp formats.
+                                        @dWS = date(@wStart)
+                                        @dLatest = date(@latestStart)
+                                        if @dWS > @dLatest {
+                                            @latestStart = @wStart
+                                            @latestEnd = @wEnd
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if @okTypes contains ",{@hType}," {
                             // number() fails on empty text on-device (e.g.
                             // bodyweight history has null weight_kg), so it
@@ -351,6 +414,10 @@ if @errFlag == 0 {
                     @volR = round(@vol, "Tenths")
                     @volExJson = "{@volExJson}{@volExSep}\"{@safeTitle}\": {@volR}"
                     @volExSep = ", "
+                    // Routine total: sum of the rounded per-exercise
+                    // volumes (rounded after each add, mirroring the JS).
+                    @totalVolSum = @totalVol + @volR
+                    @totalVol = round(@totalVolSum, "Tenths")
                     // Per-muscle-group volume, in first-seen muscle order.
                     @curVolVal = getValue(@volDict, @muscle)
                     @curVolTxt = "{@curVolVal}"
@@ -366,6 +433,21 @@ if @errFlag == 0 {
                     @volDict = setValue(@volDict, @muscle, "{@newVol}")
                 }
             }
+        }
+    }
+
+    // Routine duration: minutes between the latest workout's start and
+    // end (timeBetweenDates = WFInput - WFTimeUntilFromDate, in Minutes).
+    // Null when no title-matching workout had both timestamps, or the
+    // data is bad (negative span).
+    @durMinJson = "null"
+    if @latestStart != @empty {
+        @dStart = date(@latestStart)
+        @dEnd = date(@latestEnd)
+        @durMin = timeBetweenDates(@dStart, @dEnd)
+        if @durMin >= 0 {
+            @durMinR = round(@durMin, "Tenths")
+            @durMinJson = "{@durMinR}"
         }
     }
 
@@ -401,7 +483,7 @@ if @errFlag == 0 {
     if @bodyWeightNum > 0 {
         @bwJsonVal = "{@bodyWeightNum}"
     }
-    @resultJson = "{@ob}\"routineName\": \"{@safeRoutineName}\", \"workingSetsPerMuscleGroup\": {@ob}{@wsEntries}{@cb}, \"volumeKgPerExercise\": {@ob}{@volExJson}{@cb}, \"volumeKgPerMuscleGroup\": {@ob}{@volMuscleJson}{@cb}, \"oneRepMaxKgPerExercise\": {@ob}{@rmJson}{@cb}, \"bodyWeightKgUsed\": {@bwJsonVal}{@cb}"
+    @resultJson = "{@ob}\"routineName\": \"{@safeRoutineName}\", \"workingSetsPerMuscleGroup\": {@ob}{@wsEntries}{@cb}, \"volumeKgPerExercise\": {@ob}{@volExJson}{@cb}, \"volumeKgPerMuscleGroup\": {@ob}{@volMuscleJson}{@cb}, \"oneRepMaxKgPerExercise\": {@ob}{@rmJson}{@cb}, \"bodyWeightKgUsed\": {@bwJsonVal}, \"routineWorkingSets\": {@totalWs}, \"routineVolumeKg\": {@totalVol}, \"routineDurationMinutes\": {@durMinJson}{@cb}"
 }
 
 // --- Error payload (built always; used only on the error branch) ---
@@ -424,8 +506,12 @@ if @errFlag == 0 {
     @finalJson = @resultJson
     show("{@finalJson}")
 }
-@finalResult = getDictionary(@finalJson)
 @finalTxt = "{@finalJson}"
 if @finalTxt == @empty {
     show("Hevy Stats: internal error, empty result (this should never happen).")
 }
+// The shortcut's output is its last action's output: always the result or
+// error dictionary. This assignment MUST stay the final action (no trailing
+// no-op If): Hevy Record Metrics calls this shortcut with Run Shortcut and
+// relies on receiving a Dictionary.
+@finalResult = getDictionary(@finalJson)
