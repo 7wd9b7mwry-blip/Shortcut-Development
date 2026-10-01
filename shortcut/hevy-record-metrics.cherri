@@ -72,8 +72,8 @@ action 'is.workflow.actions.getvalueforkey' dictKeys(variable dict: 'WFInput'): 
 @errVal = getValue(@stats, "_error")
 @errTxt = "{@errVal}"
 
-@ob = "{"
-@cb = "}"
+@ob = '{'
+@cb = '}'
 
 if @errTxt != @empty {
     // Handled error from Hevy Stats: show it and pass it through unchanged.

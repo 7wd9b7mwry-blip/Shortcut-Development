@@ -54,8 +54,34 @@ SHORTCUTS = {
 }
 
 
+def check_brace_literals(src_path: Path) -> int:
+    """Cherri silently compiles a double-quoted lone "{" or "}" to empty
+    text (it treats the brace as an interpolation start). Literal braces in
+    double-quoted strings must use single quotes instead: '{' / '}'.
+    Fail the build if the source contains the broken pattern."""
+    import re
+    text = src_path.read_text()
+    bad = []
+    for i, line in enumerate(text.splitlines(), 1):
+        # Match exactly "{" or "}" as a full double-quoted literal, or as a
+        # contains/comparison operand: contains "{" / == "{" etc.  Anything
+        # with more content ("{@x}", "{ShortcutInput}") is fine.
+        for m in re.finditer(r'"([{}])"', line):
+            bad.append((i, m.group(0)))
+    if bad:
+        for i, lit in bad:
+            print(f"ERROR: {src_path.name}:{i}: double-quoted lone brace {lit} "
+                  f"compiles to empty text; use single quotes ('{lit[1]}')",
+                  file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_one(key: str, src_name: str, wf_name: str, dist_name: str,
               must_have: str, must_not_have: tuple) -> int:
+    src_path = ROOT / "shortcut" / src_name
+    if check_brace_literals(src_path):
+        return 1
     work = OUT_DIR / "work" / key
     if work.exists():
         shutil.rmtree(work)

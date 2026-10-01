@@ -111,7 +111,7 @@ if @inputTxt contains "\"api_key\"" {
             @bodyWeightTxt = getFirstItem(@wvParts)
         }
     } else {
-        if @inputTxt contains "{" {
+        if @inputTxt contains '{' {
             // Dict-shaped but no api_key: leave @apiKey empty so the
             // missing-key error below fires (a no-op assignment keeps
             // the branch non-empty for the compiler).

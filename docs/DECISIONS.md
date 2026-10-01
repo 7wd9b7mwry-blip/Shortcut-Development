@@ -312,3 +312,22 @@ Cherri gotchas hit while building the wrapper:
 35 (native-sim.js), 9 (record-metrics-sim.js), real-fixtures-check
 passed against Daniel's data (Sample: 6 working sets, 1646.5 kg,
 0.3 min). Signed artifacts pending device runs.
+
+## FIX 7 (Oct 1, 2026): double-quoted lone braces compile to empty text
+
+Daniel's screenshot of the wrapper's output showed
+`["Form Name": "Hevy - Muscle Group", ...]` — no curly braces, and the
+result was a single merged dictionary instead of a list. Root cause: in
+`hevy-record-metrics.cherri` the brace literals were double-quoted
+(`@ob = "{"`), and Cherri's string parser treats `{` as an interpolation
+start, silently compiling them to EMPTY text. Verified in the compiled
+plist: the two `gettext` actions had empty `WFTextActionText`.
+
+Rule: literal braces in .cherri sources must be single-quoted (`'{'` /
+`'}'`); double-quoted `"{"` / `"}"` compile to empty with no warning.
+`hevy-stats.cherri` already used single quotes for @ob/@cb (which is why
+Hevy Stats worked), but its `if @inputTxt contains "{"` had the same bug
+(compiled to `contains ""`, vacuously true/false). Fixed to `'{'`.
+
+`build/build.py` now fails the build if any .cherri source contains a
+double-quoted lone `"{"` or `"}"`.
